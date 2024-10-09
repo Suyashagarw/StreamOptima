@@ -1,4 +1,3 @@
-
 import math
 import decoder
 import numpy as np
@@ -9,11 +8,12 @@ import matplotlib.patches as patches
 from skimage.metrics import structural_similarity as ssim
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from skimage.metrics import peak_signal_noise_ratio as psnr
+import os, shutil
 
 # Y Only Video Codec
 class Y_Video_codec:
 
-    def __init__(self, h_pixels, w_pixels, frames, block_size, search_range, Qp, intra_dur, intra_mode, lam=None, VBSEnable=False, nRefFrames=1, yuv_file=None,  y_only_frame_arr=None, fast_me=False, FMEEnable=False, targetBR=0, row_budget=0, RCflag=False,frame_budget=0):
+    def __init__(self, h_pixels, w_pixels, frames, block_size, search_range, Qp, intra_dur, intra_mode, lam=None, VBSEnable=False, nRefFrames=1, yuv_file=None,  y_only_frame_arr=None, fast_me=False, FMEEnable=False, RCFlag=None, targetBR=None, frame_rate=30, qp_rate_tables=None, intra_thresh=None):
         self.y_only_f_arr      = None
         self.y_only_f_arr_blks = None
         self.y_only_f_arr_stch = None
@@ -26,16 +26,18 @@ class Y_Video_codec:
         self.blockified_f      = False
         self.stiched_f         = False
         self.block_size        = block_size
+        self.num_blocks_per_row= w_pixels/block_size
+        self.num_blocks_per_col= h_pixels/block_size
         self.sub_block_size    = block_size//2
         self.search_range      = search_range
         self.Qp                = Qp
-        self.const_qp          = Qp
+        self.const_init_Qp     = Qp
         self.Qpm1              = None
         self.intra_dur         = intra_dur
         self.intra_mode        = intra_mode
         self.Q                 = self.generate_Q_matrix(block_size, Qp)
         self.Qm1               = None
-        self.decoder           = decoder.decoder(intra_mode, intra_dur, block_size, frames, h_pixels, w_pixels, Qp, nRefFrames, FMEEnable, lam, VBSEnable, RCflag=RCflag)
+        self.decoder           = decoder.decoder(intra_mode, intra_dur, block_size, frames, h_pixels, w_pixels, Qp, nRefFrames, FMEEnable, lam, VBSEnable, False, RCFlag, targetBR, frame_rate, qp_rate_tables)
         self.encoded_package   = None
         self.encoded_package_f = False
         self.nRefFrames        = nRefFrames
@@ -43,20 +45,13 @@ class Y_Video_codec:
         self.FMEEnable         = FMEEnable
         self.VBSEnable         = VBSEnable
         self.lam               = lam
-        self.targetBR          = targetBR
-        self.row_budget        = row_budget
-        self.frame_budget      = frame_budget
-        self.RCflag            = RCflag
-        self.cif_qp_i_table   = np.array([139718.0, 132241.0, 108276.0, 84894.0, 63763.0, 45728.0, 31296.0, 20040.0, 12374.0, 7906.0, 6161.0, 5626.0])
-        self.cif_qp_i_table/=8
-        self.cif_qp_p_table    =np.array([117082.0, 90450.0, 68915.0, 50002.0, 34444.0, 24746.0, 17354.0, 12297.0, 7514.0, 4836.0, 4167.0, 3990.0])
-        self.cif_qp_p_table/=8
-        self.qcif_qp_i_table   = np.array([69422.0, 58143.0, 47524.0, 38942.0, 30895.0, 22056.0, 13663.0, 7194.0, 3931.0, 2198.0, 1461.0, 1305.0])
-        self.qcif_qp_i_table/=8
-        self.qcif_qp_p_table    =np.array([58183.0, 44377.0, 35931.0, 28604.0, 22263.0, 17282.0, 12167.0, 8099.0, 4509.0, 2697.0, 2074.0, 1969.0])
-        self.qcif_qp_p_table/=8
-        
-        self.qp_table          = np.zeros((frames,h_pixels//block_size))
+        self.RCFlag            = RCFlag
+        self.target_bitrate    = None
+        self.bitrate_per_row   = None
+        self.frame_rate        = frame_rate
+        self.qr_rate_tables    = qp_rate_tables
+        self.intra_thresh      = intra_thresh
+
         if Qp > 0:
             self.Qpm1 = self.Qp-1
             self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)
@@ -64,10 +59,40 @@ class Y_Video_codec:
             self.Qpm1 = self.Qp
             self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)
 
+        if targetBR != None:
+            tokens = targetBR.split(" ")
+            num    = int(tokens[0])
+            
+            if tokens[1] == "kbps":
+                self.target_bitrate = num * 1024
+            elif tokens[1] == "mbps":
+                self.target_bitrate = num * 1048576
+            else: # bps
+                self.target_bitrate = num
+            self.bitrate_per_row = (self.target_bitrate//self.frame_rate)/(self.w_pixels/self.block_size)
+            self.bitrate_per_frame = (self.target_bitrate//self.frame_rate)
+            
+            #print("Bitrate per row: ", self.bitrate_per_row)
+            #print("Bitrate per frame: ", self.bitrate_per_frame)
+
         if yuv_file != None:
             self.y_only_f_arr = self.read_yuv(yuv_file, h_pixels, w_pixels, frames)
         else:
             self.y_only_f_arr = y_only_frame_arr # numpy arr with index (frame, px height, px width)
+
+    # Set target bitrate for Rate control
+    def set_target_bitrate(self, targetBR):
+        tokens = targetBR.split(" ")
+        num    = int(tokens[0])
+        
+        if tokens[1] == "kbps":
+            self.target_bitrate = num * 1024
+        elif tokens[1] == "mbps":
+            self.target_bitrate = num * 1048576
+        else: # bps
+            self.target_bitrate = num
+            
+        self.bitrate_per_row = (num//self.frame_rate)/(self.h_pixels/self.block_size)
 
     # Read Y-component from a YUV 4:2:0 file
     @staticmethod
@@ -182,34 +207,12 @@ class Y_Video_codec:
         if replace:
             self.stiched_f         = True
             self.y_only_f_arr_stch = Y_ONLY_BLOCKS_AVG
-    
-    def get_qp_val(self,qp_table, row_budget):
-        # print('row==========',row_budget)
-        # print(row_budget)
-        # print(qp_table)
-        for i,val in enumerate(qp_table):
-            # print(i,val)
-            if val<=row_budget:
-                # print(i,val,row_budget)
-                # exit()
-                return i
-        return 11
-            
-    def changed_qp(self,qp):
-        self.Qp= qp
-        self.Q = self.generate_Q_matrix(self.block_size, qp)
-        if self.Qp > 0:
-            self.Qpm1 = self.Qp-1
-            self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)
-        else:
-            self.Qpm1 = self.Qp
-            self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)        
-        return
+
     # View frame
     def view_frame(self, frame):
         plt.imshow(self.y_only_f_arr[frame], cmap="gray")
         plt.show()
-
+    
     # View blockified frame
     def view_blockified_frame(self, frame):
         if self.blockified_f == False:
@@ -301,59 +304,6 @@ class Y_Video_codec:
     def compute_mae(self, block1, block2):
         return np.mean(np.abs(block1 - block2))
 
-    # # Find the best match for a block in a reference frame within a defined search range.
-    # def find_best_match(self, current_block, ref_frame, x, y, block_size=None, search_range=None):
-
-    #     if block_size == None: block_size = self.block_size
-    #     if search_range == None: search_range = self.search_range
-        
-    #     best_mae = float('inf')
-    #     best_mv = (0, 0)
-
-    #     for dx in range(-search_range, search_range + 1):
-    #         for dy in range(-search_range, search_range + 1):
-    #             # Ensure the reference block is entirely within the frame boundaries
-    #             if (x+dx >= 0 and x+dx+block_size <= ref_frame.shape[1] and
-    #                 y+dy >= 0 and y+dy+block_size <= ref_frame.shape[0]):
-
-    #                 ref_block = ref_frame[y+dy:y+dy+block_size, x+dx:x+dx+block_size]
-    #                 mae = self.compute_mae(current_block, ref_block)
-
-    #                 # Check if this block is a better match than the previous ones
-    #                 if mae < best_mae:
-    #                     # print(best_mae)      
-    #                     best_mae = mae
-    #                     best_mv = (dx, dy)
-
-    #                 # If MAE is the same, check motion vector magnitude
-    #                 elif mae == best_mae: 
-    #                     if (abs(dx) + abs(dy)) < (abs(best_mv[0]) + abs(best_mv[1])) or (abs(dx) + abs(dy)) == (abs(best_mv[0]) + abs(best_mv[1])) and (dy < best_mv[1] or (dy == best_mv[1] and dx < best_mv[0])):
-    #                         best_mv = (dx, dy)      
-    #     return best_mv, best_mae
-
-    # Perform block-based motion estimation for the current frame against a reference frame."""
-    # def inter_prediction(self, current_frame, ref_frame, block_size=None, search_range=None):
-
-    #     if block_size == None: block_size = self.block_size
-    #     if search_range == None: search_range = self.search_range
-
-    #     mvs = []
-    #     total_mae = 0.0
-        
-    #     for y in range(0, current_frame.shape[0], block_size):
-    #         for x in range(0, current_frame.shape[1], block_size):
-    #             # if (x >= 0 and x+block_size <= ref_frame.shape[1] and
-    #                 # y >= 0 and y+block_size <= ref_frame.shape[0]):
-    #             # print("x,y: ", x,y)
-    #             current_block = current_frame[y:y+block_size, x:x+block_size]
-    #             mv, mae = self.find_best_match(current_block, ref_frame, x, y, block_size, search_range)
-    #             # print("mv, mae", mv, mae)
-    #             mvs.append(mv)
-    #             total_mae += mae
-                
-    #     average_mae = total_mae / (len(mvs) or 1)
-    #     return mvs, average_mae
-
     def visualize_comparison(self, img1, img2=None, img3=None, block_size=2, factor=1):
         plt.figure(figsize=(15, 5))
         plt.subplot(1, 3, 1)
@@ -427,6 +377,7 @@ class Y_Video_codec:
             
         plt.axis('off')  # Turn off the axis
         plt.show()
+
 # Example usage:
 # frame = np.array(...)  # Your frame data here
 # ref_indices = np.array(...)  # Your reference frame index data here
@@ -442,24 +393,17 @@ class Y_Video_codec:
             rows=[]
             cols=[]
             for row in ar:
-                # row = np.array([1., 2., 3., 4., 6., 0.])
                 avg_row = ((row + np.roll(row, -1))/2.0)
                 combined_avg_row=(np.vstack([row, avg_row]).flatten('F')[:-1])
                 rows.append(combined_avg_row)
             for row in np.array(rows).T:
-                # row = np.array([1., 2., 3., 4., 6., 0.])
                 avg_row = ((row + np.roll(row, -1))/2.0)
                 combined_avg_row=(np.vstack([row, avg_row]).flatten('F')[:-1])
-                # print(combined_avg_row)
                 cols.append(np.ceil(combined_avg_row))
             ref_frame_=np.array(cols).T
-            # print(ref_frame[::2,::2],'\n\n!!!!!!!!!!!!!!')
-            # print(ref_frame[1::2,1::2],'\n\n!!!!!!!!!!!!!!')
             all_frames.append(ref_frame_)
-            # print(np.array(cols).T)
         return all_frames
-    
-    
+      
     def frac_me_find_best_match(self, current_block, ref_frames, x, y, block_size=None, search_range=None):
         if block_size is None: 
             block_size = self.block_size
@@ -473,8 +417,6 @@ class Y_Video_codec:
         for ref_idx, ref_frame in enumerate(ref_frames):
             for dx in range(-search_range*block_size, search_range*block_size + 1,block_size):
                 for dy in range(-search_range*block_size, search_range*block_size + 1,block_size):
-                    # if ref_idx>=len(ref_frames):
-                    #     break
                     # Check reference block within the current reference frame boundaries
                     if 0 <= x+dx < ref_frame.shape[1] - block_size and 0 <= y+dy < ref_frame.shape[0] - block_size:
                         ref_block = ref_frame[y+dy:y+dy+block_size, x+dx:x+dx+block_size]
@@ -483,9 +425,6 @@ class Y_Video_codec:
                         if mae < best_mae:
                             best_mae = mae
                             best_mv = (dx//block_size, dy//block_size, ref_idx)
-                        # elif mae == best_mae:
-                        #     if self.is_better_mv(best_mv, (dx//block_size, dy//block_size, ref_idx)):
-                        #         best_mv = (dx, dy, ref_idx)
         return best_mv, best_mae
     
     def calculate_inter_frame_residual(self, x, y, mv, current_block, ref_frames, block_size=None):
@@ -502,8 +441,6 @@ class Y_Video_codec:
         # Ensure the coordinates are within the reference frame boundaries
         if 0 <= pred_x < ref_frame.shape[1] - block_size and 0 <= pred_y < ref_frame.shape[0] - block_size:
 
-            #predicted_block = ref_frame[pred_y:pred_y + block_size, pred_x:pred_x + block_size]
-            #if 0 <= pred_x+block_size*2 < ref_frame.shape[1] - block_size and 0 <= pred_y+block_size*2 < ref_frame.shape[0] - block_size:
             if self.FMEEnable:
                 if 0 <= pred_x+block_size*2 < ref_frame.shape[1] - block_size and 0 <= pred_y+block_size*2 < ref_frame.shape[0] - block_size:
                     predicted_block = ref_frame[pred_y:pred_y + block_size*2:2, pred_x:pred_x + block_size*2:2]
@@ -511,8 +448,6 @@ class Y_Video_codec:
                     predicted_block = np.ones((block_size, block_size)) * 128
             else :
                 predicted_block = ref_frame[pred_y:pred_y + block_size, pred_x:pred_x + block_size]
-            #else:
-            #   predicted_block = ref_frame[pred_y:pred_y + block_size, pred_x:pred_x + block_size]
         else:
             # Handle the case where the block is outside the boundaries
             # This might involve padding or other strategies
@@ -522,6 +457,110 @@ class Y_Video_codec:
         
         return residual
 
+    def inter_prediction_precise(self, current_frame, mv_per_frame, ref_frames, block_size=None, search_range=None, nRefFrames=None, fast_me=False, mvp=(0, 0)):
+        if block_size is None: 
+            block_size = self.block_size
+        if search_range is None: 
+            search_range = self.search_range
+        if nRefFrames is None: 
+            nRefFrames = self.nRefFrames
+
+        mvs = []
+        residual_per_block = []
+        total_mae = 0.0
+        
+        sub_block_size = block_size//2
+        index = 0
+
+        for y in range(0, current_frame.shape[0], block_size):
+            for x in range(0, current_frame.shape[1], block_size):
+                
+                mv_hint = mv_per_frame[index]
+                mv_hint_x = mv_hint[1][0]
+                mv_hint_y = mv_hint[1][1]
+
+                # VBS metrics are initialized to None to reflect that they wont be populated unless VBSEnable is set
+                vbs_mvs = None
+                vbs_residuals = None
+                vbs_mae = None
+
+                if self.VBSEnable == True and x != 0 and y != 0: # If VBS is enabled, we process the sub blocks in parallel to the parent block
+                    vbs_mvs = []
+                    vbs_residuals = []
+                    vbs_mae = 0
+                    
+                    for y_vbs in range(y, y+block_size, sub_block_size):
+                        for x_vbs in range(x, x+block_size, sub_block_size):
+                            current_block_vbs = current_frame[y_vbs:y_vbs+sub_block_size, x_vbs:x_vbs+sub_block_size]
+
+                            if fast_me:
+                                
+                                if self.FMEEnable:
+                                    mv, mae = self.fast_motion_estimation(current_block_vbs, ref_frames, x_vbs*2, y_vbs*2, sub_block_size, mvp, nRefFrames, hint_x=mv_hint_x, hint_y=mv_hint_y)
+                                    residual = self.calculate_inter_frame_residual(x_vbs*2, y_vbs*2, mv, current_block_vbs, ref_frames, sub_block_size)
+                                else :
+                                    mv, mae = self.fast_motion_estimation(current_block_vbs, ref_frames, x_vbs, y_vbs, sub_block_size, mvp, nRefFrames, hint_x=mv_hint_x, hint_y=mv_hint_y)
+                                    residual = self.calculate_inter_frame_residual(x_vbs, y_vbs, mv, current_block_vbs, ref_frames, sub_block_size)
+                            else: 
+                                
+                                if self.FMEEnable:
+                                    mv, mae = self.find_best_match(current_block_vbs, ref_frames, x_vbs*2, y_vbs*2, sub_block_size, search_range, hint_x=mv_hint_x, hint_y=mv_hint_y)
+                                    residual = self.calculate_inter_frame_residual(x_vbs*2, y_vbs*2, mv, current_block_vbs, ref_frames, sub_block_size)
+                                else:
+                                    mv, mae = self.find_best_match(current_block_vbs, ref_frames, x_vbs, y_vbs, sub_block_size, search_range, hint_x=mv_hint_x, hint_y=mv_hint_y)
+                                    residual = self.calculate_inter_frame_residual(x_vbs, y_vbs, mv, current_block_vbs, ref_frames, sub_block_size)
+                            
+                            # Calculate residuals
+
+                            vbs_mvs.append(mv)
+                            vbs_residuals.append(residual)
+                            vbs_mae = vbs_mae + mae
+
+                    vbs_mae = vbs_mae/len(vbs_mvs)
+                    
+                # The encoding and processing for the complete block is enabled regardless of whether VBS is enabled  
+                current_block = current_frame[y:y+block_size, x:x+block_size]
+
+                if fast_me:
+                    #yet to set fast_motion_estimation for FME
+                    if self.FMEEnable:
+                        mv, mae = self.fast_motion_estimation(current_block, ref_frames, x*2, y*2, block_size, mvp, nRefFrames, hint_x=mv_hint_x, hint_y=mv_hint_y)
+                        residual = self.calculate_inter_frame_residual(2*x, 2*y, mv, current_block, ref_frames, block_size )
+                    else :
+                        mv, mae = self.fast_motion_estimation(current_block, ref_frames, x, y, block_size, mvp, nRefFrames, hint_x=mv_hint_x, hint_y=mv_hint_y)
+                        residual = self.calculate_inter_frame_residual(x, y, mv, current_block, ref_frames, block_size )
+                else:
+                    if self.FMEEnable:
+                        mv, mae = self.find_best_match(current_block, ref_frames, x*2, y*2, block_size, search_range, hint_x=mv_hint_x, hint_y=mv_hint_y)
+                        residual = self.calculate_inter_frame_residual(2*x, 2*y, mv, current_block, ref_frames, block_size)
+                    else:
+                        mv, mae = self.find_best_match(current_block, ref_frames, x, y, block_size, search_range, hint_x=mv_hint_x, hint_y=mv_hint_y)
+                        residual = self.calculate_inter_frame_residual(x, y, mv, current_block, ref_frames, block_size )
+                
+                if self.VBSEnable and x != 0 and y != 0:
+                    RD_cost_vbs = self.calculate_RD_cost(1, 1, vbs_mae, vbs_residuals, block_size, sub_block_size, self.lam)
+                    RD_cost_bs  = self.calculate_RD_cost(1, 0, mae, residual, block_size, sub_block_size, self.lam)
+
+                    if RD_cost_bs < RD_cost_vbs:
+                        mvs.append(tuple((0, mv)))
+                        residual_per_block.append(tuple((0, residual)))
+                    else:
+                        mvs.append(tuple((1, vbs_mvs)))
+                        residual_per_block.append(tuple((1, vbs_residuals)))
+
+                    mae = vbs_mae
+                else:
+                    mvs.append(tuple((0, mv)))
+                    residual_per_block.append(tuple((0, residual)))
+                
+                total_mae += mae
+                mvp = mv
+
+            index = index + 1
+
+        average_mae = total_mae / (len(mvs) or 1)
+        return mvs, average_mae, residual_per_block
+    
     def inter_prediction(self, current_frame, ref_frames, block_size=None, search_range=None, nRefFrames=None, fast_me=False, mvp=(0, 0)):
         if block_size is None: 
             block_size = self.block_size
@@ -554,7 +593,6 @@ class Y_Video_codec:
                             current_block_vbs = current_frame[y_vbs:y_vbs+sub_block_size, x_vbs:x_vbs+sub_block_size]
 
                             if fast_me:
-                                #mv, mae = self.fast_motion_estimation(current_block_vbs, ref_frames, x_vbs, y_vbs, sub_block_size, mvp, nRefFrames)
                                 
                                 if self.FMEEnable:
                                     mv, mae = self.fast_motion_estimation(current_block_vbs, ref_frames, x_vbs*2, y_vbs*2, sub_block_size, mvp, nRefFrames)
@@ -563,7 +601,6 @@ class Y_Video_codec:
                                     mv, mae = self.fast_motion_estimation(current_block_vbs, ref_frames, x_vbs, y_vbs, sub_block_size, mvp, nRefFrames)
                                     residual = self.calculate_inter_frame_residual(x_vbs, y_vbs, mv, current_block_vbs, ref_frames, sub_block_size)
                             else: 
-                                #mv, mae = self.find_best_match(current_block_vbs, ref_frames, x_vbs, y_vbs, sub_block_size, search_range)
                                 
                                 if self.FMEEnable:
                                     mv, mae = self.find_best_match(current_block_vbs, ref_frames, x_vbs*2, y_vbs*2, sub_block_size, search_range)
@@ -597,10 +634,6 @@ class Y_Video_codec:
                         residual = self.calculate_inter_frame_residual(2*x, 2*y, mv, current_block, ref_frames, block_size )
                     else:
                         mv, mae = self.find_best_match(current_block, ref_frames, x, y, block_size, search_range)
-                        #print("X: ", x)
-                        #print("Y: ", y)
-                        #print("mae: ", mae)
-                        #print("Ref Frames shape: ", ref_frames[0].shape)
                         residual = self.calculate_inter_frame_residual(x, y, mv, current_block, ref_frames, block_size )
                 
                 if self.VBSEnable and x != 0 and y != 0:
@@ -608,13 +641,9 @@ class Y_Video_codec:
                     RD_cost_bs  = self.calculate_RD_cost(1, 0, mae, residual, block_size, sub_block_size, self.lam)
 
                     if RD_cost_bs < RD_cost_vbs:
-                        #print("RD_cost_bs: ", RD_cost_bs, " | RD_cost_vbs: ", RD_cost_vbs)
-                        #print("Inter Selecting block size")
                         mvs.append(tuple((0, mv)))
                         residual_per_block.append(tuple((0, residual)))
                     else:
-                        #print("RD_cost_bs: ", RD_cost_bs, " | RD_cost_vbs: ", RD_cost_vbs)
-                        #print("Inter Selecting variable block size")
                         mvs.append(tuple((1, vbs_mvs)))
                         residual_per_block.append(tuple((1, vbs_residuals)))
 
@@ -629,40 +658,7 @@ class Y_Video_codec:
         average_mae = total_mae / (len(mvs) or 1)
         return mvs, average_mae, residual_per_block
 
-
-    #def find_best_match(self, current_block, ref_frames, x, y, block_size=None, search_range=None):
-    #    if block_size is None: 
-    #        block_size = self.block_size
-    #    if search_range is None: 
-    #        search_range = self.search_range
-    #    
-    #    best_mae = float('inf')
-    #    best_mv = (0, 0, 0)  # Including the reference frame index.
-
-    #    # Iterate over all reference frames.
-    #    for ref_idx, ref_frame in enumerate(ref_frames):
-    #        for dx in range(-search_range, search_range + 1):
-    #            for dy in range(-search_range, search_range + 1):
-    #                # if ref_idx>=len(ref_frames):
-    #                #     break
-    #                # Check reference block within the current reference frame boundaries
-    #                if 0 <= x+dx < ref_frame.shape[1] - block_size and 0 <= y+dy < ref_frame.shape[0] - block_size:
-    #                    ref_block = ref_frame[y+dy:y+dy+block_size, x+dx:x+dx+block_size]
-    #                    mae = self.compute_mae(current_block, ref_block)
-    
-    #                    print("Best MAE: ", best_mae, " | MAE: ", mae)
-
-    #                    if mae < best_mae:
-    #                        best_mae = mae
-    #                        best_mv = (dx, dy, ref_idx)
-    #                    elif mae == best_mae:
-    #                        if self.is_better_mv(best_mv, (dx, dy, ref_idx)):
-    #                            best_mv = (dx, dy, ref_idx)
-    #    return best_mv, best_mae
-
-    def find_best_match(self, current_block, ref_frames, x, y, block_size=None, search_range=None):
-        # print(type(ref_frames))
-        # print(type(ref_frames[0]))
+    def find_best_match(self, current_block, ref_frames, x, y, block_size=None, search_range=None, hint_x=0, hint_y=0):
         if block_size is None: 
             block_size = self.block_size
         if search_range is None: 
@@ -676,14 +672,11 @@ class Y_Video_codec:
             
             dx_range=search_range+1
             dy_range=search_range+1
-            for dx in range(-search_range, dx_range ):
-                for dy in range(-search_range, dy_range):
-                    # if ref_idx>=len(ref_frames):
-                    #     break
+            for dx in range(-search_range+hint_x, dx_range+hint_x ):
+                for dy in range(-search_range+hint_y, dy_range+hint_y):
                     # Check reference block within the current reference frame boundaries
                     if 0 <= x+dx < ref_frame.shape[1] - block_size and 0 <= y+dy < ref_frame.shape[0] - block_size:
                         
-                        #if 0 <= x+dx+block_size*2 < ref_frame.shape[1] - block_size and 0 <= y+dy+block_size*2 < ref_frame.shape[0] - block_size:
                         if self.FMEEnable:
                             if 0 <= x+dx+block_size*2 < ref_frame.shape[1] - block_size and 0 <= y+dy+block_size*2 < ref_frame.shape[0] - block_size:
                                 ref_block = ref_frame[y+dy:y+dy+block_size*2:2, x+dx:x+dx+block_size*2:2]
@@ -703,22 +696,18 @@ class Y_Video_codec:
                             elif mae == best_mae:
                                 if self.is_better_mv(best_mv, (dx, dy, ref_idx)):
                                     best_mv = (dx, dy, ref_idx)
-                        # print(x+dx,y+dy)
-                        
-                        #print("Best MAE: ", best_mae, " | MAE: ", mae)
 
         return best_mv, best_mae
         
-    def fast_motion_estimation(self, current_block, ref_frames, x, y, block_size, mvp, nRefFrames):
+    def fast_motion_estimation(self, current_block, ref_frames, x, y, block_size, mvp, nRefFrames, hint_x=0, hint_y=0):
         best_mae = float('inf')
         best_mv = mvp
         best_ref_idx = 0
         
         for ref_idx, ref_frame in enumerate(ref_frames[:nRefFrames]):
             # Check all positions around the MVP
-            for dx in range(mvp[0] - 1, mvp[0] + 2):
-                for dy in range(mvp[1] - 1, mvp[1] + 2):
-                    # print(type(ref_frame))
+            for dx in range(mvp[0]+hint_x - 1, mvp[0]+hint_x + 2):
+                for dy in range(mvp[1]+hint_y - 1, mvp[1] +hint_y+ 2):
                     if 0 <= x + dx < ref_frame.shape[1] - block_size and 0 <= y + dy < ref_frame.shape[0] - block_size:
 
                         if 0 <= x+dx+block_size*2 < ref_frame.shape[1] - block_size and 0 <= y+dy+block_size*2 < ref_frame.shape[0] - block_size:
@@ -761,8 +750,6 @@ class Y_Video_codec:
 
         return padded_block
 
-
-
     # Helper method to compare motion vectors if MAE is the same.
     def is_better_mv(self, mv1, mv2):
         # Compare the L1 norm of the motion vectors and the reference frame index.
@@ -781,11 +768,7 @@ class Y_Video_codec:
 
     # Quantize the transform coefficients (TC) using the Q matrix.
     def quantize_TC(self, TC, Q):
-        
-        # try: QTC = np.round(TC / Q).astype(int)
-        # except: print(TC,Q)
         QTC = np.round(TC / Q).astype(int)
-        # except: print(TC,Q)
         return QTC
 
     # Round off the residual error to the nearest 2s power
@@ -828,19 +811,17 @@ class Y_Video_codec:
         #return (predicted_block + residual_block).astype(np.uint8)
 
     # Reconstruct the entire frame using motion vectors, ref frame, and approximated residuals.
-    def reconstruct_frame(self, mvs, ref_frames, approximated_residual_blocks, block_size,frame_no):
-        # print('aaaaaaaaaaaaaaaaaaaaaaaaaaa')
+    def reconstruct_frame(self, mvs, ref_frames, approximated_residual_blocks, Qp_per_row, block_size, generate_row_wise_stat):
         reconstructed_frame = np.zeros_like(ref_frames[0]).astype(np.uint8)
         if self.FMEEnable:
             ref_frames_fme=self.frac_me_reference_frame(ref_frames, block_size)
-        # print('a')
+        
         for idx, mv in enumerate(mvs):
-            if idx%(self.w_pixels/self.block_size) == 0 and self.RCflag:
-                self.changed_qp(self.qp_table[frame_no,idx//(self.w_pixels//self.block_size)])
-            # print('aaaaaaaa')
-            # print('aa')
-            # if idx%(self.w_pixels/self.block_size) == 0 and self.RCflag:
-            #     self.changed_qp(idx//(self.w_pixels/self.block_size))
+            
+            if self.RCFlag != None and self.RCFlag > 0 and not generate_row_wise_stat:
+                if idx%self.num_blocks_per_row == 0:
+                    self.set_Qp(Qp_per_row[int(idx//self.num_blocks_per_row)])
+
             if mv[0] == 0: # No split
                 block_y = (idx // (ref_frames[mv[1][2]].shape[1] // block_size)) * block_size
                 block_x = (idx % (ref_frames[mv[1][2]].shape[1] // block_size)) * block_size
@@ -868,16 +849,11 @@ class Y_Video_codec:
                         else:
                             predicted_block = np.ones((block_size, block_size)) * 128 
 
-                        #predicted_block = ref_frame[pred_y:pred_y + block_size*2:2, pred_x:pred_x + block_size*2:2]
                     else: predicted_block = ref_frame[pred_y:pred_y + block_size, pred_x:pred_x + block_size]
-                    #predicted_block = ref_frame[pred_y:pred_y + block_size, pred_x:pred_x + block_size]
                 else:
                     # Handle the case where the block is outside the boundaries
                     # This might involve padding or other strategies
                     predicted_block = self.handle_boundary_conditions(ref_frame, pred_y, pred_x, block_size)
-                # print(block_y, mv[1])
-                # predicted_block = ref_frames[mv[2]][block_y + mv[1]:block_y + mv[1] + block_size, block_x + mv[0]:block_x + mv[0] + block_size]
-                
                 reconstructed_block = self.reconstruct_block(predicted_block, approximated_residual_blocks[idx][1], self.Q)
             else: # Split
                 reconstructed_block = np.ones((block_size, block_size)) * 0
@@ -924,8 +900,7 @@ class Y_Video_codec:
                         # Handle the case where the block is outside the boundaries
                         # This might involve padding or other strategies
                         predicted_block = self.handle_boundary_conditions(ref_frame, pred_y, pred_x, block_size//2)
-                    # print(block_y, mv[1])
-                    # predicted_block = ref_frames[mv[2]][block_y + mv[1]:block_y + mv[1] + block_size, block_x + mv[0]:block_x + mv[0] + block_size]
+                    
                     if sb_mv_id == 0:
                         reconstructed_block[0:block_size//2, 0:block_size//2] = self.reconstruct_block(predicted_block, approximated_residual_blocks[idx][1][sb_mv_id], self.Qm1)
                     elif sb_mv_id == 1:
@@ -950,15 +925,21 @@ class Y_Video_codec:
                 if x + y < i - 1:     Q[x][y] = 2 ** QP
                 elif x + y == i - 1:  Q[x][y] = 2 ** (QP + 1)
                 else:                 Q[x][y] = 2 ** (QP + 2)
-        # if(QP==0):
-        #     print(i,QP,Q)
-            # exit()
         return Q
 
     # Edit Qp
     def set_Qp (self, Qp):
+        # Edit Qp and the Corresponding Q matrix
         self.Qp = Qp
         self.Q = self.generate_Q_matrix(self.block_size, Qp)
+        
+        # Edit Qpm1 and the Corresponding Qm1 matrix
+        if Qp > 0:
+            self.Qpm1 = self.Qp-1
+            self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)
+        else:
+            self.Qpm1 = self.Qp
+            self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)
 
     # Plot PSNR and SSIM
     def plot_psnr_ssim(self, block_sizes, psnr_values, ssim_values):
@@ -1009,7 +990,7 @@ class Y_Video_codec:
         return None
 
     # Find best match in the horizontal direction using left-i
-    def intra_find_best_match_horizontal(self, current_block, ref_frame, x, y, block_size=None, search_range=None):
+    def intra_find_best_match_horizontal(self, current_block, ref_frame, x, y, block_size=None, search_range=None, hint=0):
         
         if block_size == None: block_size = self.block_size
         if search_range == None: search_range = self.search_range
@@ -1024,9 +1005,8 @@ class Y_Video_codec:
             ref_block = np.ones((block_size, block_size)) * 128
             best_mae  = self.compute_mae(current_block, ref_block)
             residuals = current_block - ref_block
-
         else:
-            for dx in range(-search_range, search_range + 1):
+            for dx in range(-search_range+hint, search_range+hint+1):
                 # Ensure the reference block is entirely within the frame boundaries
                 if (x+dx >= 0 and x+dx+block_size <= ref_frame.shape[1]):
                     ref_block = ref_frame[y:y+block_size, x+dx:x+dx+block_size]
@@ -1043,13 +1023,11 @@ class Y_Video_codec:
                         if abs(dx) < abs(best_mv) or abs(dx) == abs(best_mv):
                             best_mv = dx 
                             residuals = current_block - ref_block
-                            # print(residuals)
-                            # exit()
 
         return best_mv, best_mae, residuals
 
     # Find best match in the vertical direction using top-i
-    def intra_find_best_match_vertical(self, current_block, ref_frame, x, y, block_size=None, search_range=None):
+    def intra_find_best_match_vertical(self, current_block, ref_frame, x, y, block_size=None, search_range=None, hint=0):
         
         if block_size == None: block_size = self.block_size
         if search_range == None: search_range = self.search_range
@@ -1066,7 +1044,7 @@ class Y_Video_codec:
             residuals = current_block - ref_block
 
         else:
-            for dy in range(-search_range, search_range + 1):
+            for dy in range(-search_range+hint, search_range+hint+1):
                 # Ensure the reference block is entirely within the frame boundaries
                 if (y+dy >= 0 and y+dy+block_size <= ref_frame.shape[0]):
                     ref_block = ref_frame[y+dy:y+dy+block_size, x:x+block_size]
@@ -1102,7 +1080,6 @@ class Y_Video_codec:
             else:
                 i, j = k - n + 1, n - 1
             while i < n and j >= 0:
-                # print(i,j)
                 if residual_block[i][j]!=0:
                     if flag==0:
                         if zero_count:
@@ -1115,7 +1092,6 @@ class Y_Video_codec:
                     non_zero_count+=1
                     # flag=1
                 else:
-                    # print('else:',i,j)
                     if flag==1:
                         if non_zero_count:
                             result.append(-non_zero_count)
@@ -1148,25 +1124,19 @@ class Y_Video_codec:
             entropy_encoded_residual = self.entropy_encoder_block(self.quantize_TC(self.apply_2d_dct(residuals), self.Q), block_size)
             if frame_type == 0: # Intra frame
                 bit_rate = 8 # For intra frame we send only a single integer (8bits) value as motion vector
-                #print("NO_SPLIT | BIT RATE cost: ", bit_rate, "; MAE: ", mae, "; RD_COST: ", lam*bit_rate+mae)
             else: # inter frame
                 bit_rate = 8 * 2 # In inter frame we send 2 integers (8 bits) values as motion vector
-                #print("NO_SPLIT | BIT RATE cost: ", bit_rate, "; MAE: ", mae, "; RD_COST: ", lam*bit_rate+mae)
             bit_rate = bit_rate + 8 * len(entropy_encoded_residual)
         else: # Calculate RD cost for the sub blocks
             if frame_type == 0: # Intra frame
                 bit_rate = 8 * 4 # We will have to send 4 short ints since there are 4 sub blocks
-                #print("SPLIT | BIT RATE cost: ", bit_rate, "; MAE: ", mae, "; RD_COST: ", lam*bit_rate+mae)
             else: # inter frame
                 bit_rate = 8 * 4 * 2 # We will have to send 4 pairs of short ints since there are 4 sub blocks
-                #print("SPLIT | BIT RATE cost: ", bit_rate, "; MAE: ", mae, "; RD_COST: ", lam*bit_rate+mae)
             
             for i in range(0, len(residuals)):
                 entropy_encoded_residual = self.entropy_encoder_block(self.quantize_TC(self.apply_2d_dct(residuals[i]), self.Qm1), sub_block_size)
                 bit_rate = bit_rate + 8 * len(entropy_encoded_residual)
         
-        # RD_cost = lambda * Bitrate + Distrotion
-        #print("Output: ", lam * bit_rate + mae)
         return lam * bit_rate + mae 
 
     def intra_prediction(self, current_frame, mode=0, block_size=None, search_range=None):
@@ -1178,9 +1148,8 @@ class Y_Video_codec:
         residual_per_block = []
         total_mae = 0.0
 
-        ref_frame = np.ones((self.h_pixels, self.w_pixels)) * 128
+        ref_frame = np.ones((288, 352)) * 128
 
-        #print("FRAME")
         for y in range(0, current_frame.shape[0], block_size):
             for x in range(0, current_frame.shape[1], block_size):
                 
@@ -1209,12 +1178,9 @@ class Y_Video_codec:
 
                             vbs_mvs.append(mv)
                             vbs_residuals.append(residual)
-                            #print("VBS MAE POINT: ", mae)
                             vbs_mae = vbs_mae + mae
                     
-                    #print("VBS MAE POINT: ", vbs_mae)
                     vbs_mae = vbs_mae/len(vbs_mvs)
-                    #print("VBS MAE Average: ", vbs_mae)
 
                 # The encoding and processing for the complete block is enabled regardless of whether VBS is enabled  
                 current_block = current_frame[y:y+block_size, x:x+block_size]
@@ -1230,13 +1196,9 @@ class Y_Video_codec:
                     RD_cost_bs  = self.calculate_RD_cost(0,0,mae,residual,block_size, sub_block_size, self.lam)
 
                     if RD_cost_bs < RD_cost_vbs:
-                        #print("RD_cost_bs: ", RD_cost_bs, " | RD_cost_vbs: ", RD_cost_vbs)
-                        #print("[",self.lam,"] Intra Selecting block size")
                         mvs.append(tuple((0, mv)))
                         residual_per_block.append(tuple((0, residual)))
                     else:
-                        #print("RD_cost_bs: ", RD_cost_bs, " | RD_cost_vbs: ", RD_cost_vbs)
-                        #print("[", self.lam, "] Intra Selecting variable block size")
                         mvs.append(tuple((1, vbs_mvs)))
                         residual_per_block.append(tuple((1, vbs_residuals)))
 
@@ -1255,15 +1217,6 @@ class Y_Video_codec:
                     reconstructed_block = ref_frame[(y+mv):(y+mv)+block_size, x:x+block_size] + residual
 
                 ref_frame[y:y+block_size, x:x+block_size] = reconstructed_block
-                #if self.VBSEnable:
-                #    i = 0
-                #    sub_block_size = block_size//2
-                #    for y_vbs in range(y, y+block_size, sub_block_size):
-                #        for x_vbs in range(x, x+block_size, sub_block_size):
-                #            residual_frame[y_vbs:y_vbs+sub_block_size, x_vbs:x_vbs+sub_block_size] = vbs_residuals[i]
-                #            i = i + 1
-                #else:                            
-                #    residual_frame[y:y+block_size, x:x+block_size] = residual
 
                 total_mae += mae
 
@@ -1271,8 +1224,101 @@ class Y_Video_codec:
 
         return mvs, average_mae, residual_per_block, ref_frame
     
+    def intra_prediction_precise(self, mvs_per_frame, current_frame, mode=0, block_size=None, search_range=None):
+        
+        if block_size == None: block_size = self.block_size
+        if search_range == None: search_range = self.search_range
+
+        mvs = []
+        residual_per_block = []
+        total_mae = 0.0
+
+        ref_frame = np.ones((288, 352)) * 128
+
+        #print("Print mvs: ", mvs_per_frame)
+        
+        index = 0
+
+        for y in range(0, current_frame.shape[0], block_size):
+            for x in range(0, current_frame.shape[1], block_size):
+
+                mv_hint = mvs_per_frame[index][1]
+
+                # VBS metrics are initialized to None to reflect that they wont be populated unless VBSEnable is set
+                vbs_mvs = None
+                vbs_residuals = None
+                vbs_mae = None
+
+                # If variable block sizes are enabled, then process the sub-blocks in parallel to the main block
+                if self.VBSEnable == True and x != 0 and y != 0:
+                    vbs_mvs = []
+                    vbs_residuals = []
+                    vbs_mae = 0
+
+                    sub_block_size = block_size//2
+                    
+                    # Sub blocks processed in a "Z" pattern
+                    for y_vbs in range(y, y+block_size, sub_block_size):
+                        for x_vbs in range(x, x+block_size, sub_block_size):
+                            current_block_vbs = current_frame[y_vbs:y_vbs+sub_block_size, x_vbs:x_vbs+sub_block_size]
+                            
+                            if mode==0:
+                                mv, mae, residual = self.intra_find_best_match_horizontal(current_block_vbs, ref_frame, x_vbs, y_vbs, sub_block_size, search_range,hint=mv_hint)
+                            else:
+                                mv, mae, residual = self.intra_find_best_match_vertical(current_block_vbs, ref_frame, x_vbs, y_vbs, sub_block_size, search_range, hint=mv_hint)
+
+                            vbs_mvs.append(mv)
+                            vbs_residuals.append(residual)
+                            vbs_mae = vbs_mae + mae
+                    
+                    vbs_mae = vbs_mae/len(vbs_mvs)
+
+                # The encoding and processing for the complete block is enabled regardless of whether VBS is enabled  
+                current_block = current_frame[y:y+block_size, x:x+block_size]
+                    
+                if mode == 0:
+                    mv, mae, residual = self.intra_find_best_match_horizontal(current_block, ref_frame, x, y, block_size, search_range, mv_hint)
+                else:
+                    mv, mae, residual = self.intra_find_best_match_vertical(current_block, ref_frame, x, y, block_size, search_range, mv_hint)
+
+                # If VBS is enabled we perform RD analysis to figure out whether to use VBS or standard block size
+                if self.VBSEnable and x != 0 and y != 0:
+                    RD_cost_vbs = self.calculate_RD_cost(0,1,vbs_mae, vbs_residuals, block_size, sub_block_size, self.lam)
+                    RD_cost_bs  = self.calculate_RD_cost(0,0,mae,residual,block_size, sub_block_size, self.lam)
+
+                    if RD_cost_bs < RD_cost_vbs:
+                        mvs.append(tuple((0, mv)))
+                        residual_per_block.append(tuple((0, residual)))
+                    else:
+                        mvs.append(tuple((1, vbs_mvs)))
+                        residual_per_block.append(tuple((1, vbs_residuals)))
+
+                    mae = vbs_mae
+                else:
+                    mvs.append(tuple((0, mv)))
+                    residual_per_block.append(tuple((0, residual)))
+
+                if x == 0 and mode == 0:
+                    reconstructed_block = np.ones((block_size, block_size)) * 128 + residual
+                elif y == 0 and mode == 1:
+                    reconstructed_block = np.ones((block_size, block_size)) * 128 + residual
+                elif mode == 0:
+                    reconstructed_block = ref_frame[y:y+block_size, (x+mv):(x+mv)+block_size] + residual
+                elif mode == 1:
+                    reconstructed_block = ref_frame[(y+mv):(y+mv)+block_size, x:x+block_size] + residual
+
+                ref_frame[y:y+block_size, x:x+block_size] = reconstructed_block
+
+                total_mae += mae
+
+                index = index + 1
+
+        average_mae = total_mae / (len(mvs) or 1)
+
+        return mvs, average_mae, residual_per_block, ref_frame
+    
     # Reconstruct Frame for intra prediction
-    def reconstruct_frame_intra(self, mode, mvs, approximated_residual_blocks_per_frame, block_size,frame_no):
+    def reconstruct_frame_intra(self, mode, mvs, approximated_residual_blocks_per_frame, Qp_per_row, block_size, generate_row_wise_stat):
         reconstructed_frame      = np.ones((self.h_pixels, self.w_pixels)) * 128
         residual_frame           = np.ones((self.h_pixels, self.w_pixels)) * 0
 
@@ -1280,11 +1326,12 @@ class Y_Video_codec:
 
         rescale_inv_trans_residuals = []
 
-        for idx,block in enumerate(approximated_residual_blocks_per_frame):
-            row_no=idx//(self.w_pixels//self.block_size)
-            if idx%(self.w_pixels/self.block_size) == 0 and self.RCflag:
-                    self.changed_qp(self.qp_table[frame_no,row_no])
-                # print('aaaaaaaa')
+        for num_block, block in enumerate(approximated_residual_blocks_per_frame):
+            
+            if self.RCFlag != None and self.RCFlag > 0 and not generate_row_wise_stat:
+                if num_block%self.num_blocks_per_row == 0:
+                    self.set_Qp(Qp_per_row[int(num_block//self.num_blocks_per_row)])
+            
             if block[0] == 0: # No Split
                 rescaled_block = self.rescale_QTC(block[1], self.Q)
                 inv_transformed_block = self.apply_2d_idct(rescaled_block)
@@ -1298,12 +1345,6 @@ class Y_Video_codec:
                     res_inv_trns_res_sub_blocks.append(inv_transform_block)
                 
                 rescale_inv_trans_residuals.append(tuple((1, res_inv_trns_res_sub_blocks)))
-
-        #rescale_quant_trans = [self.rescale_QTC(block, self.Q) for block in approximated_residual_blocks_per_frame]
-        #inv_transform_block = [self.apply_2d_idct(block)       for block in rescale_quant_trans]
-        #inv_transform_block = approximated_residual_blocks_per_frame
-
-        #f = open("dummy_file_dump.txt", "a")
 
         for y in range(0, self.h_pixels, block_size):
             for x in range(0, self.w_pixels, block_size):
@@ -1338,96 +1379,116 @@ class Y_Video_codec:
                                 residual_frame[y_vbs:y_vbs+block_size//2, x_vbs:x_vbs+block_size//2] = rescale_inv_trans_residuals[index][1][j]
                                 j = j + 1
 
-                #f.write("\nReconstructed block: ")
-                #f.write(str(reconstructed_block))
                 reconstructed_frame[y:y+block_size, x:x+block_size] = reconstructed_block
-                #residual_frame[y:y+block_size, x:x+block_size] = approximated_residual_blocks_per_frame[index]
-
                 index = index + 1
-
-        #f.close()
 
         reconstructed_frame = reconstructed_frame.astype(np.uint8)
         residual_frame      = residual_frame
 
         return reconstructed_frame, residual_frame
 
-    # Differntial encoder for MV
-    # def differential_encoder_frame(self, frame_type, mv_for_frame):
+    def differential_encoder_frame(self, frame_type, mv_for_frame, Qp_for_frame):
         
-    #     frame_mvs    =  ""
-    #     ref_intra_mv =  0
-    #     ref_inter_mv = (0, 0)
-        
-    #     if frame_type == 0: # Intra frame
-    #         for j in range(0, len(mv_for_frame)):
-    #             mv = -(ref_intra_mv - mv_for_frame[j])
-    #             if j==0: frame_mvs = frame_mvs + str(mv)
-    #             else: frame_mvs = frame_mvs + ";" + str(mv)
-    #             ref_intra_mv = mv_for_frame[j]
-    #     else:                     # Inter frame
-    #         for j in range(0, len(mv_for_frame)):
-    #             mv = (-(ref_inter_mv[0] - mv_for_frame[j][0]), -(ref_inter_mv[1] - mv_for_frame[j][1]))
-    #             if j==0: frame_mvs = frame_mvs + str(mv)
-    #             else: frame_mvs = frame_mvs + ";" + str(mv)
-    #             ref_inter_mv = mv_for_frame[j]
-        
-    #     return frame_mvs
-
-    def differential_encoder_frame(self, frame_type, mv_for_frame):
-        
-        frame_mvs = ""
+        frame_mvs    = ""
         ref_intra_mv = 0
         ref_inter_mv = (0, 0, 0)  # Including reference frame index
+        ref_Qp       = 0
 
         if frame_type == 0: # Intra frame
             for j, mv in enumerate(mv_for_frame):
 
                 if mv[0] == 0: # No split
                     diff_mv = mv[1] - ref_intra_mv
+                    
+                    if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                        diff_qp = Qp_for_frame[int(j//self.num_blocks_per_row)] - ref_Qp
+
                     if j == 0:
-                        frame_mvs = "0\'(" + str(diff_mv) + ")"
+                        if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                            frame_mvs = str(diff_qp)+"@0\'(" + str(diff_mv) + ")"
+                        else:
+                            frame_mvs = "0\'(" + str(diff_mv) + ")"
                     else:
-                        frame_mvs += ";0\'(" + str(diff_mv) + ")"
+                        if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                            frame_mvs += ";" + str(diff_qp) + "@0\'(" + str(diff_mv) + ")"
+                        else:
+                            frame_mvs += ";0\'(" + str(diff_mv) + ")"
                     
                     ref_intra_mv = mv[1]
+                    
+                    if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                        ref_Qp = Qp_for_frame[int(j//self.num_blocks_per_row)]
 
                 elif mv[0] == 1: #Split
+                    
+                    if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                        diff_qp = Qp_for_frame[int(j//self.num_blocks_per_row)] - ref_Qp
+                    
                     for k, sb_mv in enumerate(mv[1]): # loop through the subblock MV
                         diff_mv = sb_mv - ref_intra_mv
                         if k == 0:
-                            frame_mvs += ";1\'(" + str(diff_mv) + ","
+                            if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                                frame_mvs += ";" + str(diff_mv) + "@1\'(" + str(diff_mv) + ","
+                            else:
+                                frame_mvs += ";1\'(" + str(diff_mv) + ","
                         elif k == 3:
                             frame_mvs += str(diff_mv) + ")"
                         else:
                             frame_mvs +=  str(diff_mv) + ","
                         
                         ref_intra_mv = sb_mv
+                    
+                    if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                        ref_Qp = Qp_for_frame[int(j//self.num_blocks_per_row)]
 
         else: # Inter frame
             for j, mv in enumerate(mv_for_frame):
                 # Calculate differential for x, y and reference frame index
                 if mv[0] == 0: # No split
                     diff_mv = (mv[1][0] - ref_inter_mv[0], mv[1][1] - ref_inter_mv[1], mv[1][2] - ref_inter_mv[2])
+                    
+                    if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                        diff_qp = Qp_for_frame[int(j//self.num_blocks_per_row)] - ref_Qp
+                    
                     if j == 0:
-                        frame_mvs = "0\'" + str(diff_mv)
+                        if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                            frame_mvs = str(diff_qp) + "@0\'" + str(diff_mv)
+                        else:
+                            frame_mvs = "0\'" + str(diff_mv)
                     else:
-                        frame_mvs += ";0\'" + str(diff_mv)
+                        
+                        if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                            frame_mvs += ";" + str(diff_qp) + "@0\'" + str(diff_mv)
+                        else:
+                            frame_mvs += ";0\'" + str(diff_mv)
                     ref_inter_mv = mv[1]
+                    
+                    if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                        ref_Qp = Qp_for_frame[int(j//self.num_blocks_per_row)]
+                
                 elif mv[0] == 1: # Split
+                    
+                    if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                        diff_qp = Qp_for_frame[int(j//self.num_blocks_per_row)] - ref_Qp
+                    
                     for k, sb_mv in enumerate(mv[1]):
                         diff_mv = (sb_mv[0] - ref_inter_mv[0], sb_mv[1] - ref_inter_mv[1], sb_mv[2] - ref_inter_mv[2])
                         if k == 0:
-                            frame_mvs += ";1\'(" + str(diff_mv) + ","
+                            if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                                frame_mvs += ";" + str(diff_qp) +"@1\'(" + str(diff_mv) + ","
+                            else:
+                                frame_mvs += ";1\'(" + str(diff_mv) + ","
                         elif k == 3:
                             frame_mvs += str(diff_mv) + ")"
                         else:
                             frame_mvs += str(diff_mv) + ","
                         
                         ref_inter_mv = sb_mv
+                    
+                    if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                        ref_Qp = Qp_for_frame[int(j//self.num_blocks_per_row)]
             
         return frame_mvs
-
 
     def entropy_encoder_frame(self, frame_residuals, block_size=None):
         if block_size == None: block_size = self.block_size
@@ -1451,6 +1512,19 @@ class Y_Video_codec:
 
         return residual_for_frame
 
+    def transmit_bitstream_portion(self, frame_type, mvs, residuals, Qp_per_row, block_size=None, mv_file=None, residual_file=None):
+        
+        if block_size == None: block_size = self.block_size
+
+        f_trns_mvs_per_frame     = open(mv_file, "w")
+        f_trns_res_per_frame     = open(residual_file, "w")
+            
+        f_trns_mvs_per_frame.write(str(frame_type) + "|" + self.differential_encoder_frame(frame_type, mvs, Qp_per_row) + "\n")
+        f_trns_res_per_frame.write(str(self.entropy_encoder_frame(residuals,block_size)) + "\n")
+        
+        f_trns_mvs_per_frame.close()
+        f_trns_res_per_frame.close()
+
     def transmit_bitstream(self, intra_dur=None, block_size=None, mv_file=None, residual_file=None):
         
         if intra_dur == None: intra_dur = self.intra_dur
@@ -1460,21 +1534,23 @@ class Y_Video_codec:
             print("[ERROR] No encoded package available, please run encode() first")
             return
 
-        mvs_per_frame      = self.encoded_package["MVS per Frame"]
-        residual_per_frame = self.encoded_package["approx residual"]
+        mvs_per_frame        = self.encoded_package["MVS per Frame"]
+        residual_per_frame   = self.encoded_package["approx residual"]
+        Qp_per_row_per_frame = self.encoded_package["Qp_per_row_per_frame"]
+        frame_type_seq       = self.encoded_package["frame_type_seq"]
 
         f_trns_mvs_per_frame     = open(mv_file, "w")
-        f_trns_mvs_per_frame_raw = open(f"files/mvs_per_frame_raw_Qp_{self.Qp}_I_{self.intra_dur}.txt", "w")
+        f_trns_mvs_per_frame_raw = open(f"files/mvs_per_frame_raw.txt", "w")
 
         f_trns_res_per_frame     = open(residual_file, "w")
         for i in range(0, len(mvs_per_frame)):
             mvs = mvs_per_frame[i]
+            Qp_per_row = Qp_per_row_per_frame[i]
             residuals = residual_per_frame[i]
             
-            if i%intra_dur == 0: frame_type = 0
-            else: frame_type = 1
+            frame_type = frame_type_seq[i]
 
-            f_trns_mvs_per_frame.write(str(frame_type) + "|" + self.differential_encoder_frame(frame_type, mvs) + "\n")
+            f_trns_mvs_per_frame.write(str(frame_type) + "|" + self.differential_encoder_frame(frame_type, mvs, Qp_per_row) + "\n")
             f_trns_mvs_per_frame_raw.write(str(frame_type) + "|" + str(mvs) + "\n")
             f_trns_res_per_frame.write(str(self.entropy_encoder_frame(residuals,block_size)) + "\n")
         
@@ -1482,16 +1558,399 @@ class Y_Video_codec:
         f_trns_mvs_per_frame_raw.close()
         f_trns_res_per_frame.close()
 
+    # Find appropriate Qp values from the Qp tables
+    def get_appropriate_Qp_value(self, frame_type, row_bit_budget): # Frame type: 0 == Intra, 1 == Inter
+        for Qp, bitrate in enumerate(self.qr_rate_tables[frame_type]):
+            # print(self.qr_rate_tables)
+            # exit()
+            #print(f"Seraching Qp: Qp = {Qp} and bitrate={bitrate}")
+            # print(bitrate,row_bit_budget)
+            if bitrate < row_bit_budget:
+                return Qp, bitrate
+        return Qp, bitrate
+
+    def complete_intra_flow(self, current_padded_frame, intra_mode, block_size, search_range, generate_row_wise_stats=True, consume_row_wise_stats=False, row_wise_stats=None):
+        Qp_per_row       = []
+        quantized_blocks = []
+
+        mvs, average_mae, intra_residual, _ = self.intra_prediction(current_padded_frame, intra_mode, block_size, search_range)
+        
+        # Number of bits we can spend on a row
+        row_bit_budget = self.bitrate_per_row
+        bits_spent = 0
+
+        quantized_sized = 0
+
+        bits_spent_per_row = [0]
+        bits_spent_per_row_percentage = []
+
+        for num_block, block in enumerate(intra_residual): # block is a tuple : (split, residual/s)
+            # Adjust the row bit budget for current row based on bit spent on the previous row
+            if self.RCFlag != None and self.RCFlag > 0 and not generate_row_wise_stats:
+                if num_block == 0:
+                    if consume_row_wise_stats: 
+                        row_bit_budget = self.bitrate_per_frame * row_wise_stats[int(num_block//self.num_blocks_per_row)]
+                    else:                      row_bit_budget = self.bitrate_per_row
+                    Qp_used, bits_spent = self.get_appropriate_Qp_value(0, row_bit_budget)
+                    self.set_Qp(Qp_used)
+                    Qp_per_row.append(Qp_used)
+                elif num_block%self.num_blocks_per_row == 0:
+                    if consume_row_wise_stats: 
+                        row_bit_budget = self.bitrate_per_frame * row_wise_stats[int(num_block//self.num_blocks_per_row)] + (row_bit_budget - bits_spent)
+                    else:                      row_bit_budget = self.bitrate_per_row + (row_bit_budget - bits_spent)
+                    Qp_used, bits_spent = self.get_appropriate_Qp_value(0, row_bit_budget)
+                    self.set_Qp(Qp_used)
+                    Qp_per_row.append(Qp_used)
+            else:
+                Qp_per_row.append(self.Qp)
+
+            if block[0] == 0: # No split
+                transformed_block = self.apply_2d_dct(block[1])
+                quantized_block   = self.quantize_TC(transformed_block, self.Q)
+                quantized_sized   += len(self.entropy_encoder_block(quantized_block, block_size))
+                quantized_blocks.append(tuple((0, quantized_block)))
+            else: # Split
+                vbs_blocks = []
+                
+                for sub_block in block[1]:
+                    transformed_block = self.apply_2d_dct(sub_block)
+                    quantized_block   = self.quantize_TC(transformed_block, self.Qm1)
+                    quantized_sized   += len(self.entropy_encoder_block(quantized_block, block_size//2))
+                    vbs_blocks.append(quantized_block)
+                
+                quantized_blocks.append(tuple((1, vbs_blocks)))
+            
+            if generate_row_wise_stats and (num_block+1)%self.num_blocks_per_row == 0:
+                bits_spent_per_row.append(quantized_sized)
+        
+        reconstructed_frame, residual_frame = self.reconstruct_frame_intra(intra_mode, mvs, quantized_blocks, Qp_per_row, block_size, generate_row_wise_stats)
+
+        if generate_row_wise_stats:
+            temp_list = []
+            
+            for i in range(1, len(bits_spent_per_row)):
+                temp_list.append(bits_spent_per_row[i] - bits_spent_per_row[i-1])
+
+            for row in temp_list:
+                bits_spent_per_row_percentage.append((row/quantized_sized))
+
+        return mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_frame, quantized_sized, bits_spent_per_row_percentage
+
+    def complete_inter_flow(self, current_padded_frame, ref_frames, block_size, search_range, generate_row_wise_stats=True, consume_row_wise_stats=False, row_wise_stats=None):
+        quantized_blocks                        = []
+        Qp_per_row                              = []
+
+        if self.FMEEnable:
+            mvs, average_mae, inter_residual    = self.inter_prediction(current_padded_frame, self.frac_me_reference_frame(ref_frames, block_size), block_size, search_range*2, fast_me=self.fast_me)      # Inter prediction
+        else :
+            mvs, average_mae, inter_residual    = self.inter_prediction(current_padded_frame, ref_frames, block_size, search_range, fast_me=self.fast_me)      # Inter prediction
+        
+        if self.FMEEnable:
+            ref_frames_fme=self.frac_me_reference_frame(ref_frames, block_size)
+        
+        # Number of bits we can spend on a row
+        row_bit_budget = self.bitrate_per_row
+        bits_spent = 0
+        
+        quantized_sized = 0
+        
+        bits_spent_per_row = [0]
+        bits_spent_per_row_percentage = []
+        
+        for num_block, block in enumerate(inter_residual): # block is a tuple : (split, residual/s)
+            
+            # Adjust the row bit budget for current row based on bit spent on the previous row
+            if self.RCFlag != None and self.RCFlag > 0 and not generate_row_wise_stats:
+                if num_block == 0:
+                    if consume_row_wise_stats: 
+                        row_bit_budget = self.bitrate_per_frame * row_wise_stats[int(num_block//self.num_blocks_per_row)]
+                    else:                      row_bit_budget = self.bitrate_per_row
+                    
+                    Qp_used, bits_spent = self.get_appropriate_Qp_value(0, row_bit_budget)
+                    self.set_Qp(Qp_used)
+                    Qp_per_row.append(Qp_used)
+                elif num_block%self.num_blocks_per_row == 0:
+                    if consume_row_wise_stats: 
+                        row_bit_budget = self.bitrate_per_frame * row_wise_stats[int(num_block//self.num_blocks_per_row)] + (row_bit_budget - bits_spent)
+                    else:                      row_bit_budget = self.bitrate_per_row + (row_bit_budget - bits_spent)
+                    
+                    Qp_used, bits_spent = self.get_appropriate_Qp_value(0, row_bit_budget)
+                    self.set_Qp(Qp_used)
+                    Qp_per_row.append(Qp_used)
+            else:
+                Qp_per_row.append(self.Qp)
+            
+            if block[0] == 0:
+                transformed_block               = self.apply_2d_dct(block[1])
+                quantized_transform             = self.quantize_TC(transformed_block, self.Q)
+                quantized_sized                 += len(self.entropy_encoder_block(quantized_transform, block_size))
+                quantized_blocks.append(tuple((0,quantized_transform)))
+            else:
+                vbs_blocks = [] 
+
+                for sub_block in block[1]:
+                    transformed_block = self.apply_2d_dct(sub_block)
+                    quantized_transform = self.quantize_TC(transformed_block, self.Qm1)
+                    quantized_sized   += len(self.entropy_encoder_block(quantized_transform, block_size//2))
+                    vbs_blocks.append(quantized_transform)
+
+                quantized_blocks.append(tuple((1, vbs_blocks)))
+            
+            if generate_row_wise_stats and (num_block+1)%self.num_blocks_per_row == 0:
+                bits_spent_per_row.append(quantized_sized)
+         
+        reconstructed_frame = self.reconstruct_frame(mvs, ref_frames, quantized_blocks, Qp_per_row, block_size, generate_row_wise_stats)
+        
+        if generate_row_wise_stats:
+            temp_list = []
+            
+            for i in range(1, len(bits_spent_per_row)):
+                temp_list.append(bits_spent_per_row[i] - bits_spent_per_row[i-1])
+
+            for row in temp_list:
+                bits_spent_per_row_percentage.append((row/quantized_sized))
+
+        return mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, quantized_sized, bits_spent_per_row_percentage
+    
+    def complete_intra_flow_precise (self, current_padded_frame, mv_for_frame, intra_mode, block_size, search_range, generate_row_wise_stats=True, consume_row_wise_stats=False, row_wise_stats=None):
+        Qp_per_row       = []
+        quantized_blocks = []
+
+        if search_range//2 == 0: search_range = 1
+        else: search_range = search_range//2
+
+        mvs, average_mae, intra_residual, _ = self.intra_prediction_precise(mv_for_frame, current_padded_frame, intra_mode, block_size, search_range)
+        
+        # Number of bits we can spend on a row
+        row_bit_budget = self.bitrate_per_row
+        bits_spent = 0
+
+        quantized_sized = 0
+
+        bits_spent_per_row = [0]
+        bits_spent_per_row_percentage = []
+
+        for num_block, block in enumerate(intra_residual): # block is a tuple : (split, residual/s)
+            # Adjust the row bit budget for current row based on bit spent on the previous row
+            if self.RCFlag != None and self.RCFlag > 0 and not generate_row_wise_stats:
+                if num_block == 0:
+                    if consume_row_wise_stats: 
+                        row_bit_budget = self.bitrate_per_frame * row_wise_stats[int(num_block//self.num_blocks_per_row)]
+                    else:                      row_bit_budget = self.bitrate_per_row
+                    
+                    Qp_used, bits_spent = self.get_appropriate_Qp_value(0, row_bit_budget)
+                    self.set_Qp(Qp_used)
+                    Qp_per_row.append(Qp_used)
+                elif num_block%self.num_blocks_per_row == 0:
+                    if consume_row_wise_stats: 
+                        row_bit_budget = self.bitrate_per_frame * row_wise_stats[int(num_block//self.num_blocks_per_row)] + (row_bit_budget - bits_spent)
+                    else:                      row_bit_budget = self.bitrate_per_row + (row_bit_budget - bits_spent)
+                    
+                    Qp_used, bits_spent = self.get_appropriate_Qp_value(0, row_bit_budget)
+                    self.set_Qp(Qp_used)
+                    Qp_per_row.append(Qp_used)
+            else:
+                Qp_per_row.append(self.Qp)
+
+            if block[0] == 0: # No split
+                transformed_block = self.apply_2d_dct(block[1])
+                quantized_block   = self.quantize_TC(transformed_block, self.Q)
+                quantized_sized   += len(self.entropy_encoder_block(quantized_block, block_size))
+                quantized_blocks.append(tuple((0, quantized_block)))
+            else: # Split
+                vbs_blocks = []
+                
+                for sub_block in block[1]:
+                    transformed_block = self.apply_2d_dct(sub_block)
+                    quantized_block   = self.quantize_TC(transformed_block, self.Qm1)
+                    quantized_sized   += len(self.entropy_encoder_block(quantized_block, block_size//2))
+                    vbs_blocks.append(quantized_block)
+                
+                quantized_blocks.append(tuple((1, vbs_blocks)))
+            
+            if generate_row_wise_stats and (num_block+1)%self.num_blocks_per_row == 0:
+                bits_spent_per_row.append(quantized_sized)
+        
+        reconstructed_frame, residual_frame = self.reconstruct_frame_intra(intra_mode, mvs, quantized_blocks, Qp_per_row, block_size, generate_row_wise_stats)
+
+        if generate_row_wise_stats:
+            temp_list = []
+            
+            for i in range(1, len(bits_spent_per_row)):
+                temp_list.append(bits_spent_per_row[i] - bits_spent_per_row[i-1])
+
+            for row in temp_list:
+                bits_spent_per_row_percentage.append((row/quantized_sized))
+
+        return mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_frame, quantized_sized, bits_spent_per_row_percentage
+
+    def complete_inter_flow_precise (self, current_padded_frame, mv_for_frame, ref_frames, block_size, search_range, generate_row_wise_stats=True, consume_row_wise_stats=False, row_wise_stats=None):
+        quantized_blocks                        = []
+        Qp_per_row                              = []
+        
+        if search_range//2 == 0: search_range = 1
+        else: search_range = search_range//2
+
+        if self.FMEEnable:
+            mvs, average_mae, inter_residual    = self.inter_prediction_precise(current_padded_frame, mv_for_frame, self.frac_me_reference_frame(ref_frames, block_size), block_size, search_range*2, fast_me=self.fast_me)      # Inter prediction
+        else :
+            mvs, average_mae, inter_residual    = self.inter_prediction_precise(current_padded_frame, mv_for_frame, ref_frames, block_size, search_range, fast_me=self.fast_me)      # Inter prediction
+        
+        if self.FMEEnable:
+            ref_frames_fme=self.frac_me_reference_frame(ref_frames, block_size)
+        
+        # Number of bits we can spend on a row
+        row_bit_budget = self.bitrate_per_row
+        bits_spent = 0
+        
+        quantized_sized = 0
+        
+        bits_spent_per_row = [0]
+        bits_spent_per_row_percentage = []
+        
+        for num_block, block in enumerate(inter_residual): # block is a tuple : (split, residual/s)
+            
+            # Adjust the row bit budget for current row based on bit spent on the previous row
+            if self.RCFlag != None and self.RCFlag > 0 and not generate_row_wise_stats:
+                if num_block == 0:
+                    if consume_row_wise_stats: 
+                        row_bit_budget = self.bitrate_per_frame * row_wise_stats[int(num_block//self.num_blocks_per_row)]
+                    else:                      row_bit_budget = self.bitrate_per_row
+                    
+                    Qp_used, bits_spent = self.get_appropriate_Qp_value(0, row_bit_budget)
+                    self.set_Qp(Qp_used)
+                    Qp_per_row.append(Qp_used)
+                elif num_block%self.num_blocks_per_row == 0:
+                    if consume_row_wise_stats: 
+                        row_bit_budget = self.bitrate_per_frame * row_wise_stats[int(num_block//self.num_blocks_per_row)] + (row_bit_budget - bits_spent)
+                    else:                      row_bit_budget = self.bitrate_per_row + (row_bit_budget - bits_spent)
+                    
+                    Qp_used, bits_spent = self.get_appropriate_Qp_value(0, row_bit_budget)
+                    self.set_Qp(Qp_used)
+                    Qp_per_row.append(Qp_used)
+            else:
+                Qp_per_row.append(self.Qp)
+            
+            if block[0] == 0:
+                transformed_block               = self.apply_2d_dct(block[1])
+                quantized_transform             = self.quantize_TC(transformed_block, self.Q)
+                quantized_sized                 += len(self.entropy_encoder_block(quantized_transform, block_size))
+                quantized_blocks.append(tuple((0,quantized_transform)))
+            else:
+                vbs_blocks = [] 
+
+                for sub_block in block[1]:
+                    transformed_block = self.apply_2d_dct(sub_block)
+                    quantized_transform = self.quantize_TC(transformed_block, self.Qm1)
+                    quantized_sized   += len(self.entropy_encoder_block(quantized_transform, block_size//2))
+                    vbs_blocks.append(quantized_transform)
+
+                quantized_blocks.append(tuple((1, vbs_blocks)))
+            
+            if generate_row_wise_stats and (num_block+1)%self.num_blocks_per_row == 0:
+                bits_spent_per_row.append(quantized_sized)
+         
+        reconstructed_frame = self.reconstruct_frame(mvs, ref_frames, quantized_blocks, Qp_per_row, block_size, generate_row_wise_stats)
+        
+        if generate_row_wise_stats:
+            temp_list = []
+            
+            for i in range(1, len(bits_spent_per_row)):
+                temp_list.append(bits_spent_per_row[i] - bits_spent_per_row[i-1])
+
+            for row in temp_list:
+                bits_spent_per_row_percentage.append((row/quantized_sized))
+
+        return mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, quantized_sized, bits_spent_per_row_percentage
+
+    # Generate Qp Tables for Rate control algorithm
+    def generate_const_Qp_avg_bitrate(self, total_num_frames, mvs_file, res_file, preserve_logs=False):
+        #deleting folder contents before run
+        size_arr_intra=[]
+        size_arr_inter=[]
+        preserve_logs = False
+
+        # Segregate Inter and Intra frams into different buckets to calculate size
+        mvs_file_intra_f=f'files/temp_mvs_per_frame_Qp_{self.Qp}_I_{self.intra_dur}_intra.txt'
+        res_file_intra_f=f'files/temp_res_per_frame_Qp_{self.Qp}_I_{self.intra_dur}_intra.txt'
+        mvs_file_inter_f=f'files/temp_mvs_per_frame_Qp_{self.Qp}_I_{self.intra_dur}_inter.txt'
+        res_file_inter_f=f'files/temp_res_per_frame_Qp_{self.Qp}_I_{self.intra_dur}_inter.txt'
+
+        with open(mvs_file, "r") as mvs_f, open(mvs_file_intra_f, "w") as temp_mvs_intra_f, open(mvs_file_inter_f, "w") as temp_mvs_inter_f:
+            for l_num, line in enumerate(mvs_f):
+                if l_num % self.intra_dur == 0: temp_mvs_intra_f.write(line)
+                else:                           temp_mvs_inter_f.write(line)
+
+        with open(res_file, "r") as mvs_f, open(res_file_intra_f, "w") as temp_res_intra_f, open(res_file_inter_f, "w") as temp_res_inter_f:
+            for l_num, line in enumerate(mvs_f):
+                if l_num % self.intra_dur == 0: temp_res_intra_f.write(line)
+                else:                           temp_res_inter_f.write(line)
+
+        intra_file_size_mvs = os.path.getsize(mvs_file_intra_f)
+        intra_file_size_res = os.path.getsize(res_file_intra_f)
+        inter_file_size_mvs = os.path.getsize(mvs_file_inter_f)
+        inter_file_size_res = os.path.getsize(res_file_inter_f)
+
+        total_size_intra = (intra_file_size_mvs+intra_file_size_res) * 8
+        total_size_inter = (inter_file_size_mvs+inter_file_size_res) * 8
+
+        num_intra_frames = total_num_frames//self.intra_dur
+        num_inter_frames = total_num_frames - num_intra_frames
+
+        if num_intra_frames == 0: size_per_row_intra = 0
+        else: size_per_row_intra = (total_size_intra/num_intra_frames)//(self.h_pixels/self.block_size)
+
+        if num_inter_frames == 0: size_per_row_inter = 0
+        else: size_per_row_inter = (total_size_inter/num_inter_frames)//(self.h_pixels/self.block_size)
+
+        # Delete the excess files, clean up the workspace
+        mvs_per_frame_raw=f'files/mvs_per_frame_raw.txt'
+        y_only_decoded_f =f'yuv/y_only_decoded.yuv'
+        y_only_reconstructed_f = f'yuv/y_only_reconstructed.yuv'
+
+        if preserve_logs == False: 
+            os.remove(mvs_file_inter_f)
+            os.remove(mvs_file_intra_f)
+            os.remove(res_file_inter_f)
+            os.remove(res_file_intra_f)
+            os.remove(mvs_file)
+            os.remove(res_file)
+            os.remove(mvs_per_frame_raw)
+            os.remove(y_only_decoded_f)
+            os.remove(y_only_reconstructed_f)
+        
+        return size_per_row_intra, size_per_row_inter
+    
+    def generate_const_Qp_avg_bitrate_for_frame(self, mvs_file, res_file, preserve_logs=False):
+        #deleting folder contents before run
+        preserve_logs = False
+
+        file_size_mvs = os.path.getsize(mvs_file)
+        file_size_res = os.path.getsize(res_file)
+
+        total_size = (file_size_mvs+file_size_res) 
+        total_size = total_size//(self.h_pixels/self.block_size)
+
+        if preserve_logs == False: 
+            os.remove(mvs_file)
+            os.remove(res_file)
+        
+        return total_size
+
+
     def encode(self, intra_mode=None, intra_dur=None, search_range=None, block_size=None, save_enc_pkg=True):
         encoded_package = {}
 
+        frame_type_seq = []
+        frame_type_seq_stats = []
         mae_per_frame  = []
         mvs_per_frame  = []
+        mvs_per_frame_first_pass = []
         approximated_residual_blocks_per_frame = []
-        # ref_frame      = np.ones((self.h_pixels, self.w_pixels)) * 128  # For the first frame
+        Qp_per_row_per_frame = []
         ref_frames = [np.ones((self.h_pixels, self.w_pixels)) * 128]  # Start with one reference frame filled with 128
         reconstructed_frames = []
-        frame_no       =[]
+        frame_no       = []
         psnr_per_frame = []
         ssim_per_frame = []
 
@@ -1500,165 +1959,111 @@ class Y_Video_codec:
         if intra_dur    == None: intra_dur    = self.intra_dur
         if intra_mode   == None: intra_mode   = self.intra_mode
 
+        row_wise_stats_per_frame = []
+        constant_QP_resiudal_per_frame = []
+        
         for i in range(self.frames):
-            temp_frame_budget=self.frame_budget
-            
-            nref_frames=[]
-            mvs_frame=[]
             frame_no.append(i)
             current_padded_frame = self.pad_hw(self.y_only_f_arr[i], block_size, 128)
-            # ref_padded_frame     = self.pad_hw(ref_frame, block_size, 128)
-            quantized_blocks                    = []
+            quantized_blocks     = []
+            Qp_per_row           = []
+            #self.set_Qp(self.const_init_Qp) # Reset to constant Qp for stats generation run
+
             if i%intra_dur == 0:   # Intra
-                #print(self.row_budget)
-                last_row_bitsize = 0
-                
-                
-                
-                mvs, average_mae, intra_residual, _ = self.intra_prediction(current_padded_frame, intra_mode, block_size, search_range)            # Intra prediction
-                for block_no,block in enumerate(intra_residual): # block is a tuple : (split, residual/s)
-                    # block_no+=1
-                    
-                    if (block_no)%(self.w_pixels/self.block_size) == 0 and self.RCflag:
-                        # print('reaching')
-                        # exit()
-                        # print(self.frame_budget)
-                        # exit()
-                        row_no=block_no//(self.w_pixels//self.block_size)
-                        temp_frame_budget-=last_row_bitsize
-                        # print('last row:',last_row_bitsize,'budget remain:',temp_frame_budget)
-                        temp_row_budget = (temp_frame_budget)/(self.h_pixels/self.block_size-row_no)
-                        # print(temp_row_budget)                      
-                        temp_qp=self.get_qp_val(self.cif_qp_i_table,temp_row_budget)
-                        # print(temp_qp)
-                        self.changed_qp(temp_qp)
-                        last_row_bitsize = 0
-                        self.qp_table[i,row_no]=self.Qp
-                        # print(self.Qp)
-                        # print(block_no, temp_row_budget, last_row_bitsize,self.Qp,self.Qpm1)  
-                        # exit()
-                        # print(row_no,self.Qp,temp_row_budget)
+                # First Pass: Encode and Generate Stats
+                if self.RCFlag != None and self.RCFlag > 1:
+                    mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, row_wise_stats = self.complete_intra_flow(current_padded_frame, intra_mode, block_size, search_range, generate_row_wise_stats=True, consume_row_wise_stats=False, row_wise_stats=None)
+                    print(f"Frame: {i} | Residual size: {residual_size}")
+                    #print("Print mvs: ", mvs)
+                else:
+                    mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, row_wise_stats = self.complete_intra_flow(current_padded_frame, intra_mode, block_size, search_range, generate_row_wise_stats=False, consume_row_wise_stats=False, row_wise_stats=None)
+                    frame_type_seq.append(0)
 
+                # Second Pass: Use collected stats
+                if self.RCFlag != None and self.RCFlag > 1:
+                    # Calculate new average
+                    self.transmit_bitstream_portion(0, mvs, quantized_blocks, Qp_per_row, block_size, "temp_mvs_for_frame.txt", "temp_residual_for_frame.txt")
+                    average_bitrate_for_Qp = self.generate_const_Qp_avg_bitrate_for_frame("temp_mvs_for_frame.txt", "temp_residual_for_frame.txt", preserve_logs=False)
+                    scaling_factor_intra = average_bitrate_for_Qp/self.qr_rate_tables[0][self.Qp]
+                    qr_rate_tables_temp = []
 
-                    if block[0] == 0: # No split
-                        # if block_no==1:
-                        #     temp_budget = self.row_budget
-                        # else: 
-                            
+                    # Scale based on new averages
+                    for i in range(len(self.qr_rate_tables[0])):
+                        qr_rate_tables_temp.append(self.qr_rate_tables[0][i] * scaling_factor_intra)
 
-                        
-                        transformed_block = self.apply_2d_dct(block[1])
-                        quantized_block   = self.quantize_TC(transformed_block, self.Q)
-                        quantized_blocks.append(tuple((0, quantized_block)))
-                    
-                    else: # Split
-                        vbs_blocks = []
-                        for sub_block in block[1]:
-                            transformed_block = self.apply_2d_dct(sub_block)
-                            quantized_block   = self.quantize_TC(transformed_block, self.Qm1)
-                            vbs_blocks.append(quantized_block)
-                    
-                        quantized_blocks.append(tuple((1, vbs_blocks)))
-                    # print(block_no,(quantized_blocks[-1][1]))
-                    # print(len((((quantized_blocks[-1])[1]).tostring()).encode('utf-8')))
+                    constant_QP_resiudal_per_frame.append(residual_size)
+                    row_wise_stats_per_frame.append(row_wise_stats)
 
-                    size_in_bits=0
-                    if quantized_blocks[-1][0] == 1:
-                        for bl in quantized_blocks[-1][1]:
-                            x=self.entropy_encoder_block(bl,self.sub_block_size)
-                            size_in_bits+=(len(x)+5)
+                    qr_rate_tables_bu = self.qr_rate_tables[0].copy()
+                    self.qr_rate_tables[0] = qr_rate_tables_temp
+
+                    # Encode based on update average
+                    if self.RCFlag == 3:
+                        mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, _ = self.complete_intra_flow_precise(current_padded_frame,mvs, intra_mode, block_size, search_range, generate_row_wise_stats=False, consume_row_wise_stats=True, row_wise_stats=row_wise_stats)
                     else:
-                        x=self.entropy_encoder_block(quantized_blocks[-1][1],self.block_size)
-                        size_in_bits=len(x)+5
-                    last_row_bitsize+=(size_in_bits)
+                        mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, _ = self.complete_intra_flow(current_padded_frame, intra_mode, block_size, search_range, generate_row_wise_stats=False, consume_row_wise_stats=True, row_wise_stats=row_wise_stats)
 
-                reconstructed_frame, residual_frame = self.reconstruct_frame_intra(intra_mode, mvs, quantized_blocks, block_size,i)
-                #plt.imshow(reconstructed_frame, cmap="gray", vmin=0, vmax=255)
-                #plt.show()
-                #plt.imshow(residual_frame, cmap="gray", vmin=0, vmax=255)
-                #plt.show()
-                ref_frames = []
-                for mv in (mvs):
-                    if intra_mode==0:
-                        mvs_new = (mv, 0)
-                        mvs_frame.append(mvs_new)
-                    else:
-                        mvs_new = (0, mv)
-                        mvs_frame.append(mvs_new)
-                #approximated_residual_blocks_per_frame.append(quantized_blocks)
-                # self.visualize_motion_vectors(reconstructed_frame, mvs_frame, block_size)
-            
+                    # Restore original QR Table
+                    self.qr_rate_tables[0] = qr_rate_tables_bu
+
+                    # Save frame type for encoding
+                    frame_type_seq.append(0)
+
+                    # Setting Constant Qp to the average of the second pass
+                    self.const_init_Qp = int(sum(Qp_per_row)/len(Qp_per_row))
+
             else:                  # Inter
-                quantized_blocks                    = []
-                last_row_bitsize = 0
-                if self.FMEEnable:
-                    mvs, average_mae, inter_residual    = self.inter_prediction(current_padded_frame, self.frac_me_reference_frame(ref_frames, block_size), block_size, search_range*2, fast_me=self.fast_me)      # Inter prediction
-                else :
-                    mvs, average_mae, inter_residual    = self.inter_prediction(current_padded_frame, ref_frames, block_size, search_range, fast_me=self.fast_me)      # Inter prediction
+                if self.RCFlag != None and self.RCFlag > 1:
+                    mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_size, row_wise_stats = self.complete_inter_flow(current_padded_frame, ref_frames, block_size, search_range, generate_row_wise_stats=True, consume_row_wise_stats=False, row_wise_stats=None)
+                    print(f"Frame: {i} | Residual size: {residual_size}")
+                else:
+                    mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_size, row_wise_stats = self.complete_inter_flow(current_padded_frame, ref_frames, block_size, search_range, generate_row_wise_stats=False, consume_row_wise_stats=False, row_wise_stats=None)
+                    frame_type_seq.append(1)
                 
-                #mvs, average_mae, inter_residual        = self.inter_prediction(current_padded_frame, ref_frames, block_size, search_range, fast_me=self.fast_me)      # Inter prediction
-                
-                if self.FMEEnable:
-                    ref_frames_fme=self.frac_me_reference_frame(ref_frames, block_size)
-                
-                for block_no,block in enumerate(inter_residual): # block is a tuple : (split, residual/s)
-                    if (block_no)%(self.w_pixels/self.block_size) == 0 and self.RCflag:
-                        row_no=block_no//(self.w_pixels//self.block_size)
-                        temp_frame_budget-=last_row_bitsize
-                        # print('last row:',last_row_bitsize,'budget remain:',temp_frame_budget)
-                        temp_row_budget = (temp_frame_budget)/(self.h_pixels/self.block_size-row_no)
-                        # print(temp_row_budget)                      
-                        temp_qp=self.get_qp_val(self.cif_qp_p_table,temp_row_budget)
-                        # print(temp_qp)
-                        self.changed_qp(temp_qp)
-                        last_row_bitsize = 0
-                        self.qp_table[i,row_no]=self.Qp
-                    if block[0] == 0:
-                        transformed_block               = self.apply_2d_dct(block[1])
-                        quantized_transform             = self.quantize_TC(transformed_block, self.Q)
-                        quantized_blocks.append(tuple((0,quantized_transform)))
+                # Second Pass: Use collected stats
+                if self.RCFlag != None and self.RCFlag > 1:
+                    
+                    # If there is too much residual, encode the frame as a blind Intra frame
+                    if residual_size > self.intra_thresh:
+                        mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, row_wise_stats = self.complete_intra_flow(current_padded_frame, intra_mode, block_size, search_range, generate_row_wise_stats=False, consume_row_wise_stats=False, row_wise_stats=None)
+                        frame_type_seq.append(0)
                     else:
-                        vbs_blocks = [] 
+                        # Calculate new average
+                        self.transmit_bitstream_portion(1, mvs, quantized_blocks, Qp_per_row, block_size, "temp_mvs_for_frame.txt", "temp_residual_for_frame.txt")
+                        average_bitrate_for_Qp = self.generate_const_Qp_avg_bitrate_for_frame("temp_mvs_for_frame.txt", "temp_residual_for_frame.txt", preserve_logs=False)
+                        scaling_factor_inter = average_bitrate_for_Qp/self.qr_rate_tables[1][self.Qp]
+                        
+                        qr_rate_tables_temp = []
 
-                        for sub_block in block[1]:
-                            transformed_block = self.apply_2d_dct(sub_block)
-                            quantized_transform = self.quantize_TC(transformed_block, self.Qm1)
-                            vbs_blocks.append(quantized_transform)
+                        # Scale based on new averages
+                        for i in range(len(self.qr_rate_tables[1])):
+                            qr_rate_tables_temp.append(self.qr_rate_tables[1][i] * scaling_factor_inter)
 
-                         
-                        #print("Encoded residuals all sub blocks:", vbs_blocks)
-                        quantized_blocks.append(tuple((1, vbs_blocks)))
+                        constant_QP_resiudal_per_frame.append(residual_size)
+                        row_wise_stats_per_frame.append(row_wise_stats)
 
-                    size_in_bits=0
-                    if quantized_blocks[-1][0] == 1:
-                        for bl in quantized_blocks[-1][1]:
-                            x=self.entropy_encoder_block(bl,self.sub_block_size)
-                            size_in_bits+=(len(x)+5)
-                    else:
-                        x=self.entropy_encoder_block(quantized_blocks[-1][1],self.block_size)
-                        size_in_bits=len(x)+5
-                    last_row_bitsize+=(size_in_bits)
-                 
-                #approximated_residual_blocks_per_frame.append(quantized_blocks)
-                reconstructed_frame = self.reconstruct_frame(mvs, ref_frames, quantized_blocks, block_size,i)
-                #plt.imshow(reconstructed_frame, cmap="gray", vmin=0, vmax=255)
-                #plt.show()
-                # if self.FMEEnable:
-                #     reconstructed_frame = self.reconstruct_frame(fmvs, ref_frames, quantized_blocks, block_size)
-                # self.visualize_comparison(current_padded_frame, ref_frames[0], reconstructed_frame)
-                # for mv in (mvs):
-                #     nref_frame = mv[2]
-                #     nref_frames.append(nref_frame)
-                #     mvs_new = (mv[0], mv[1])
-                #     # print(mvs_new)
-                #     mvs_frame.append(mvs_new)
-                #     # print(mvs_frame)
-                # self.visualize_reference_frames(reconstructed_frame, np.array(nref_frames).reshape(36,44), block_size)
-                # self.visualize_motion_vectors(reconstructed_frame, mvs_frame, block_size)
+                        qr_rate_tables_bu = self.qr_rate_tables[1].copy()
+                        self.qr_rate_tables[1] = qr_rate_tables_temp
+                    
+                        if self.RCFlag == 3:
+                            mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_size, _ = self.complete_inter_flow_precise(current_padded_frame, mvs, ref_frames, block_size, search_range, generate_row_wise_stats=False, consume_row_wise_stats=True, row_wise_stats=row_wise_stats)
+                        else:
+                            mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_size, _ = self.complete_inter_flow(current_padded_frame, ref_frames, block_size, search_range, generate_row_wise_stats=False, consume_row_wise_stats=True, row_wise_stats=row_wise_stats)
+                    
+                        # Restore original QR Table
+                        self.qr_rate_tables[1] = qr_rate_tables_bu
+                    
+                        # Save frame type for encoding
+                        frame_type_seq.append(1)
+                    
+                        # Setting Constant Qp to the average of the second pass
+                        self.const_init_Qp = int(sum(Qp_per_row)/len(Qp_per_row))
+            
             mvs_per_frame.append(mvs)
             mae_per_frame.append(average_mae)
             reconstructed_frames.append(reconstructed_frame)
             approximated_residual_blocks_per_frame.append(quantized_blocks)
+            Qp_per_row_per_frame.append(Qp_per_row)
 
             if i < self.frames - 1:  # Set the current reconstructed frame as the reference for the next one
                 if len(ref_frames) >= self.nRefFrames:
@@ -1668,33 +2073,32 @@ class Y_Video_codec:
             avg_psrn, avg_ssim = self.calculate_metrics(self.y_only_f_arr[i], reconstructed_frame)
             psnr_per_frame.append(avg_psrn)
             ssim_per_frame.append(avg_ssim)
-        # print(mvs_per_frame)
-        decoded_frames = self.decoder.decode(approximated_residual_blocks_per_frame, mvs_per_frame, intra_mode, intra_dur, block_size, self.frames, self.w_pixels, self.h_pixels)
+
+        decoded_frames = self.decoder.decode(frame_type_seq, approximated_residual_blocks_per_frame, Qp_per_row_per_frame, mvs_per_frame, intra_mode, intra_dur, block_size, self.frames, self.w_pixels, self.h_pixels)
 
         # Saving the decoded frames to a Y-only file
-        self.save_y_only(f"yuv/y_only_decoded__Qp_{self.Qp}_I_{self.intra_dur}.yuv", decoded_frames)
-        # print(mvs_per_frame)
+        self.save_y_only(f"yuv/y_only_decoded.yuv", decoded_frames)
         # Collect all calculated results, useful for debugging and printing
-        encoded_package["block size"]       = block_size
-        encoded_package["num frames"]       = self.frames
-        encoded_package["height in pixels"] = self.h_pixels
-        encoded_package["width in pixels"]  = self.w_pixels
-        encoded_package["search range"]     = search_range
-        encoded_package["PSNR per frame"]   = psnr_per_frame
-        encoded_package["SSIM per frame"]   = ssim_per_frame
-        encoded_package["MAE per Frame"]    = mae_per_frame
-        encoded_package["MVS per Frame"]    = mvs_per_frame
-        encoded_package["approx residual"]  = approximated_residual_blocks_per_frame
+        encoded_package["block size"]           = block_size
+        encoded_package["num frames"]           = self.frames
+        encoded_package["height in pixels"]     = self.h_pixels
+        encoded_package["width in pixels"]      = self.w_pixels
+        encoded_package["search range"]         = search_range
+        encoded_package["PSNR per frame"]       = psnr_per_frame
+        encoded_package["SSIM per frame"]       = ssim_per_frame
+        encoded_package["MAE per Frame"]        = mae_per_frame
+        encoded_package["MVS per Frame"]        = mvs_per_frame
+        encoded_package["approx residual"]      = approximated_residual_blocks_per_frame
+        encoded_package["Qp_per_row_per_frame"] = Qp_per_row_per_frame
+        encoded_package["frame_type_seq"]       = frame_type_seq
         self.encoded_package_f              = True
 
         if save_enc_pkg == True:
             self.encoded_package = encoded_package
 
-        self.save_y_only(f"yuv/y_only_reconstructed_Qp_{self.Qp}_I_{self.intra_dur}.yuv", reconstructed_frames)
+        self.save_y_only(f"yuv/y_only_reconstructed.yuv", reconstructed_frames)
 
         # Comparing the decoded frames with the reconstructed frames
-        # print(self.qp_table)
-        # for i in range(self.frames):
-        #     assert np.array_equal(decoded_frames[i], reconstructed_frames[i]), f"Frame {i} mismatch!"
-        # print(self.qp_table)
+        for i in range(self.frames):
+            assert np.array_equal(decoded_frames[i], reconstructed_frames[i]), f"Frame {i} mismatch!"
         return psnr_per_frame

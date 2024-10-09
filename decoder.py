@@ -5,29 +5,32 @@ from scipy.fftpack import dct, idct
 
 class decoder:
 
-    def __init__(self, intra_mode, intra_dur, block_size, frames, height, width, Qp, nRefFrames, FMEEnable, lam, VBSEnable, VBSoverlay=None,RCflag=False):
-        self.intra_mode    = intra_mode
-        self.intra_dur     = intra_dur
-        self.block_size    = block_size
-        self.sub_block_size= block_size//2
-        self.frames        = frames
-        self.h_pixels      = height
-        self.w_pixels      = width
-        self.ref_frame     = np.ones((height, width)) * 128 # Hypothetical reference frame where every pixel is 128 
-        self.decoded_vid   = None
-        self.decoded_vid_f = False
-        self.Qp            = Qp
-        self.Qpm1          = None
-        self.Q             = self.generate_Q_matrix(block_size, Qp)
-        self.Qm1           = None
-        self.nRefFrames    = nRefFrames
-        self.FMEEnable     = FMEEnable
-        self.lam           = lam
-        self.VBSEnable     = VBSEnable
-        self.VBSoverlay    = VBSoverlay
-        self.qp_table      = np.zeros((frames,height//block_size))
-        self.RCflag        = RCflag
-        # print(self.RCflag)
+    def __init__(self, intra_mode, intra_dur, block_size, frames, height, width, Qp, nRefFrames, FMEEnable, lam, VBSEnable, VBSoverlay=None, RCFlag=None, targetBR=None, frame_rate=30, qp_rate_tables=None):
+        self.intra_mode        = intra_mode
+        self.intra_dur         = intra_dur
+        self.block_size        = block_size
+        self.sub_block_size    = block_size//2
+        self.frames            = frames
+        self.h_pixels          = height
+        self.w_pixels          = width
+        self.ref_frame         = np.ones((height, width)) * 128 # Hypothetical reference frame where every pixel is 128 
+        self.num_blocks_per_row= self.w_pixels/block_size
+        self.decoded_vid       = None
+        self.decoded_vid_f     = False
+        self.Qp                = Qp
+        self.Qpm1              = None
+        self.Q                 = self.generate_Q_matrix(block_size, Qp)
+        self.Qm1               = None
+        self.nRefFrames        = nRefFrames
+        self.FMEEnable         = FMEEnable
+        self.lam               = lam
+        self.VBSEnable         = VBSEnable
+        self.VBSoverlay        = VBSoverlay
+        self.RCFlag            = RCFlag
+        self.target_bitrate    = None
+        self.bitrate_per_row   = None
+        self.frame_rate        = frame_rate
+        self.qr_rate_tables    = qp_rate_tables
 
         if Qp > 0:
             self.Qpm1 = self.Qp-1
@@ -35,6 +38,18 @@ class decoder:
         else:
             self.Qpm1 = self.Qp
             self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)
+        
+        if targetBR != None:
+            tokens = targetBR.split(" ")
+            num    = int(tokens[0])
+            
+            if tokens[1] == "kbps":
+                self.target_bitrate = num * 1024
+            elif tokens[1] == "mbps":
+                self.target_bitrate = num * 1048576
+            else: # bps
+                self.target_bitrate = num
+            self.bitrate_per_row = (self.target_bitrate//self.frame_rate)/(self.h_pixels/self.block_size)
     
     #Generate the Q matrix based on the given 'i' and 'QP'.
     def generate_Q_matrix(self, i, QP):
@@ -48,10 +63,19 @@ class decoder:
 
     # Edit Qp
     def set_Qp (self, Qp):
+        # Edit Qp and the Corresponding Q matrix
         self.Qp = Qp
         self.Q = self.generate_Q_matrix(self.block_size, Qp)
+        
+        # Edit Qpm1 and the Corresponding Qm1 matrix
+        if Qp > 0:
+            self.Qpm1 = self.Qp-1
+            self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)
+        else:
+            self.Qpm1 = self.Qp
+            self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)
     
-    # Reconstruct the block by adding the approximated residual to the predicted block."""
+    # Reconstruct the block by adding the approximated residual to the predicted block.
     def reconstruct_block(self, predicted_block, residual_block, Q):
         rescale_quant_trans = self.rescale_QTC(residual_block, Q)
         inv_transform_block = self.apply_2d_idct(rescale_quant_trans)
@@ -60,29 +84,16 @@ class decoder:
     def construct_VBS_overlay(self, split, block):
         overlay_reconstructed_block = np.copy(block)
         overlay_reconstructed_block[0, :]  = 0
-        #overlay_reconstructed_block[7,:]   = 0
         overlay_reconstructed_block[:,0]   = 0
-        #overlay_reconstructed_block[:,7]   = 0
         
         if split == 1:
             overlay_reconstructed_block[self.block_size//2]    = 0
             overlay_reconstructed_block[:,self.block_size//2] = 0
         
         return overlay_reconstructed_block
-    
-    def changed_qp(self,qp):
-        self.Qp= qp
-        self.Q = self.generate_Q_matrix(self.block_size, qp)
-        if self.Qp > 0:
-            self.Qpm1 = self.Qp-1
-            self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)
-        else:
-            self.Qpm1 = self.Qp
-            self.Qm1  = self.generate_Q_matrix(self.sub_block_size, self.Qpm1)       
-        return
 
     # Inter prediction: Decode a frame using the provided motion vectors and residuals.
-    def decode_frame_inter(self, ref_frames, mvs, approximated_residual_blocks, block_size=None,frame_no=99):
+    def decode_frame_inter(self, ref_frames, mvs, approximated_residual_blocks, Qp_per_row, block_size=None):
         if block_size == None: block_size = self.block_s
 
         reconstructed_frame = np.zeros_like(ref_frames[0]).astype(np.uint8)
@@ -96,8 +107,11 @@ class decoder:
             overlay_reconstructed_frame = None
 
         for idx, mv in enumerate(mvs):
-            if idx%(self.w_pixels/self.block_size) == 0 and self.RCflag:
-                self.changed_qp(self.qp_table[frame_no,idx//(self.w_pixels//self.block_size)])
+            
+            if self.RCFlag != None and self.RCFlag > 0:
+                if idx%self.num_blocks_per_row == 0:
+                    self.set_Qp(Qp_per_row[int(idx//self.num_blocks_per_row)])
+
             if mv[0] == 0: # No split
                 block_y = (idx // (ref_frames[mv[1][2]].shape[1] // block_size)) * block_size
                 block_x = (idx % (ref_frames[mv[1][2]].shape[1] // block_size)) * block_size
@@ -125,13 +139,10 @@ class decoder:
                         else:
                             predicted_block = np.ones((block_size, block_size)) * 128
                     else: predicted_block = ref_frame[pred_y:pred_y + block_size, pred_x:pred_x + block_size]
-                    #predicted_block = ref_frame[pred_y:pred_y + block_size, pred_x:pred_x + block_size]
                 else:
                     # Handle the case where the block is outside the boundaries
                     # This might involve padding or other strategies
                     predicted_block = self.handle_boundary_conditions(ref_frame, pred_y, pred_x, block_size)
-                # print(block_y, mv[1])
-                # predicted_block = ref_frames[mv[2]][block_y + mv[1]:block_y + mv[1] + block_size, block_x + mv[0]:block_x + mv[0] + block_size]
                 reconstructed_block = self.reconstruct_block(predicted_block, approximated_residual_blocks[idx][1], self.Q)
                 if self.VBSEnable:
                     overlay_reconstructed_block = self.construct_VBS_overlay(0, reconstructed_block)
@@ -157,7 +168,6 @@ class decoder:
                         ref_frame = ref_frames_fme[sb_mv[2]]
                     else:
                         ref_frame = ref_frames[sb_mv[2]]  # Reference frame corresponding to the third component of mv
-                    #ref_frame = ref_frames[sb_mv[2]]  # Reference frame corresponding to the third component of mv
                     mv_x, mv_y = sb_mv[0], sb_mv[1]  # Motion vector components
 
                     # Calculate the coordinates for the predicted block
@@ -170,7 +180,6 @@ class decoder:
 
                     # Ensure the coordinates are within the reference frame boundaries
                     if 0 <= pred_x < ref_frame.shape[1] - block_size//2 and 0 <= pred_y < ref_frame.shape[0] - block_size//2:
-                        #predicted_block = ref_frame[pred_y:pred_y + block_size//2, pred_x:pred_x + block_size//2]
                         if self.FMEEnable:
                             if 0 <= pred_x+block_size < ref_frame.shape[1] - block_size and 0 <= pred_y+block_size < ref_frame.shape[0] - block_size:
                                 predicted_block = ref_frame[pred_y:pred_y + block_size:2, pred_x:pred_x + block_size:2]
@@ -181,8 +190,6 @@ class decoder:
                         # Handle the case where the block is outside the boundaries
                         # This might involve padding or other strategies
                         predicted_block = self.handle_boundary_conditions(ref_frame, pred_y, pred_x, block_size//2)
-                    # print(block_y, mv[1])
-                    # predicted_block = ref_frames[mv[2]][block_y + mv[1]:block_y + mv[1] + block_size, block_x + mv[0]:block_x + mv[0] + block_size]
                     if sb_mv_id == 0:
                         reconstructed_block[0:block_size//2, 0:block_size//2] = self.reconstruct_block(predicted_block, approximated_residual_blocks[idx][1][sb_mv_id], self.Qm1)
                     elif sb_mv_id == 1:
@@ -203,7 +210,7 @@ class decoder:
         return reconstructed_frame, overlay_reconstructed_frame
 
     # Intra Prediction: Decode a frame using the provided motion vectors and residuals.
-    def decode_frame_intra(self, mvs, approximated_residual_blocks_per_frame, mode=None, block_size=None,frame_no=99):
+    def decode_frame_intra(self, mvs, approximated_residual_blocks_per_frame, Qp_per_row, mode=None, block_size=None):
         if mode == None: mode = self.intra_mode
         if block_size == None: block_size = self.block_s
 
@@ -220,13 +227,11 @@ class decoder:
         
         rescale_inv_trans_residuals = []
 
-        for idx,block in enumerate(approximated_residual_blocks_per_frame):
-            # print(idx)
-            if idx%(self.w_pixels/self.block_size) == 0 and self.RCflag:
-                # print(idx)
-                self.changed_qp(self.qp_table[frame_no,idx//(self.w_pixels//self.block_size)])
-            
+        for num_block, block in enumerate(approximated_residual_blocks_per_frame):
 
+            if self.RCFlag != None and self.RCFlag > 0:
+                if num_block%self.num_blocks_per_row == 0:
+                    self.set_Qp(Qp_per_row[int(num_block//self.num_blocks_per_row)])
 
             if block[0] == 0: # No Split
                 rescaled_block = self.rescale_QTC(block[1], self.Q)
@@ -241,11 +246,9 @@ class decoder:
                     res_inv_trns_res_sub_blocks.append(inv_transform_block)
                 
                 rescale_inv_trans_residuals.append(tuple((1, res_inv_trns_res_sub_blocks)))
-        # block_count=0
+        
         for y in range(0, self.h_pixels, block_size):
             for x in range(0, self.w_pixels, block_size):
-                
-                # block_count+=1
                 if x == 0 and mode == 0:
                     reconstructed_block = np.ones((block_size, block_size)) * 128 + rescale_inv_trans_residuals[index][1]
                     residual_frame[y:y+block_size, x:x+block_size] = rescale_inv_trans_residuals[index][1]
@@ -311,20 +314,6 @@ class decoder:
 
         return reconstructed_frame.astype(np.uint8), residual_frame, overlay_reconstructed_frame
     
-    # def handle_boundary_conditions(self, ref_frame, y, x, block_size):
-    #     frame_height, frame_width = ref_frame.shape
-    #     padded_block = np.zeros((block_size, block_size), dtype=ref_frame.dtype)
-
-    #     # Calculate the overlap between the desired block and the actual frame
-    #     y_start = max(y, 0)
-    #     y_end = min(y + block_size, frame_height)
-    #     x_start = max(x, 0)
-    #     x_end = min(x + block_size, frame_width)
-
-    #     # Copy the overlapping part from the reference frame to the padded block
-    #     padded_block[y_start-y:y_end-y, x_start-x:x_end-x] = ref_frame[y_start:y_end, x_start:x_end]
-
-    #     return padded_block
     def handle_boundary_conditions(self, ref_frame, y, x, block_size):
         frame_height, frame_width = ref_frame.shape
         padded_block = np.zeros((block_size, block_size), dtype=ref_frame.dtype)
@@ -363,30 +352,22 @@ class decoder:
         all_frames=[]
         for ar in np.copy(ref_frames):
             ar=np.array(ar)
-            # ax=ar.T
-            # print(ax)
             rows=[]
             cols=[]
             for row in ar:
-                # row = np.array([1., 2., 3., 4., 6., 0.])
                 avg_row = ((row + np.roll(row, -1))/2.0)
                 combined_avg_row=(np.vstack([row, avg_row]).flatten('F')[:-1])
                 rows.append(combined_avg_row)
             for row in np.array(rows).T:
-                # row = np.array([1., 2., 3., 4., 6., 0.])
                 avg_row = ((row + np.roll(row, -1))/2.0)
                 combined_avg_row=(np.vstack([row, avg_row]).flatten('F')[:-1])
-                # print(combined_avg_row)
                 cols.append(np.ceil(combined_avg_row))
             ref_frame_=np.array(cols).T
-            # print(ref_frame[::2,::2],'\n\n!!!!!!!!!!!!!!')
-            # print(ref_frame[1::2,1::2],'\n\n!!!!!!!!!!!!!!')
             all_frames.append(ref_frame_)
-            # print(np.array(cols).T)
         return all_frames
     
     # Main decoding function
-    def decode(self, residual_file, mv_file, intra_mode=None, intra_dur=None, block_size = None, frames=None, width=None, height=None, save_decoded_frames=True):
+    def decode(self, frame_type_seq, residual_file, Qp_per_row_per_frame, mv_file, intra_mode=None, intra_dur=None, block_size = None, frames=None, width=None, height=None, save_decoded_frames=True):
         
         if intra_dur == None: intra_dur = self.intra_dur
         if intra_mode == None: intra_mode = self.intra_mode
@@ -402,18 +383,21 @@ class decoder:
         decoded_frames = []
         overlay_decoded_frames = []
         
+        #print("Frame_type_seq: ", frame_type_seq)
         for i in range(frames):
-            if i%intra_dur == 0:
-               decoded_frame, _ , overlay_decoded_frame = self.decode_frame_intra(mv_per_frame[i], residuals_per_frame[i], intra_mode, block_size,i)
-               #plt.imshow(decoded_frame)
-               #plt.show()
-               #exit()
-               ref_frames = []
-            else: 
-                #if self.FMEEnable:
-                #   ref_frames= self.frac_me_reference_frame(ref_frames, block_size)
+            frame_type = frame_type_seq[i]
 
-               decoded_frame, overlay_decoded_frame  = self.decode_frame_inter(ref_frames, mv_per_frame[i], residuals_per_frame[i], block_size,i)
+            if frame_type == 0:
+                if self.RCFlag != None and self.RCFlag > 0:
+                    decoded_frame, _ , overlay_decoded_frame = self.decode_frame_intra(mv_per_frame[i], residuals_per_frame[i], Qp_per_row_per_frame[i], intra_mode, block_size)
+                else:
+                    decoded_frame, _ , overlay_decoded_frame = self.decode_frame_intra(mv_per_frame[i], residuals_per_frame[i], None, intra_mode, block_size)
+                ref_frames = []
+            else: 
+                if self.RCFlag != None and self.RCFlag > 0:
+                    decoded_frame, overlay_decoded_frame  = self.decode_frame_inter(ref_frames, mv_per_frame[i], residuals_per_frame[i], Qp_per_row_per_frame[i], block_size)
+                else:
+                    decoded_frame, overlay_decoded_frame  = self.decode_frame_inter(ref_frames, mv_per_frame[i], residuals_per_frame[i], None, block_size)
             
             decoded_frames.append(decoded_frame)
             
@@ -483,10 +467,19 @@ class decoder:
         mvs = raw[1].split(";")
 
         frame_mvs = []
-        
+        frame_Qp  = []
+
         if frame_type == 0: # Intra 
-            ref_mv = 0 
+            ref_mv = 0
+            ref_qp = 0 
             for j, mv_split in enumerate(mvs):
+                
+                if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                    Qp, mv_split = mv_split.split("@")
+                    Qp = ref_qp + int(eval(Qp))
+                    frame_Qp.append(Qp)
+                    ref_qp = Qp
+
                 split, mv_b = mv_split.split("\'")
                 if split == "0": # No Split
                     mv = ref_mv + int(eval(mv_b))
@@ -502,7 +495,15 @@ class decoder:
                     frame_mvs.append(tuple((1, sb_mv_list)))
         else:               # Inter
             ref_mv = (0,0,0)
+            ref_qp = 0
             for j, mv_split in enumerate(mvs):
+                
+                if self.RCFlag != None and self.RCFlag > 0 and j%self.num_blocks_per_row == 0:
+                    Qp, mv_split = mv_split.split("@")
+                    Qp = ref_qp + int(eval(Qp))
+                    frame_Qp.append(Qp)
+                    ref_qp = Qp
+                
                 split, mv_b = mv_split.split("\'")
                 if split == "0": # No split
                     mv_i = eval(mv_b)
@@ -519,7 +520,7 @@ class decoder:
                     
                     frame_mvs.append(tuple((1, sb_mv_list)))
         
-        return frame_mvs
+        return frame_type, frame_mvs, frame_Qp
 
     def entropy_decoder_frame(self, residual_for_frame, block_size):
         residuals_per_block = residual_for_frame.split(";")
@@ -544,27 +545,23 @@ class decoder:
 
 
     def decode_differential_entropy(self, all_mv_f, all_residual_f, block_size):
+        frame_type_seq = []
         mv_for_vid  = []
+        Qp_for_vid  = []
         res_for_vid = []
         
         with open(all_mv_f) as all_mv:
             for line in all_mv:
-                mv_for_vid.append(self.differential_decoder_frame(line))
-        # print(mv_for_vid)
-        #f_decode_trns_mvs_per_frame     = open("decode_trns_mvs_per_frame.txt", "a")
-
-        #for i in range(0, len(mv_for_vid)):
-        #    frame_type = mv_for_vid[i][0]
-        #    mvs        = mv_for_vid[i][1]
-        #    f_decode_trns_mvs_per_frame.write(str(frame_type) + "|" + str(mvs) + "\n")
-        
-        #f_decode_trns_mvs_per_frame.close()
+                frame_type, mv_f_v, qp_f_v = self.differential_decoder_frame(line)
+                mv_for_vid.append(mv_f_v)
+                Qp_for_vid.append(qp_f_v)
+                frame_type_seq.append(frame_type)
 
         with open(all_residual_f) as all_residuals:
             for line in all_residuals:
                 res_for_vid.append(self.entropy_decoder_frame(line, block_size))
         
-        return mv_for_vid, res_for_vid
+        return frame_type_seq, mv_for_vid, Qp_for_vid, res_for_vid
 
     def decode_bitstream(self, mv_file, residual_file, intra_mode=None, intra_dur=None, block_size = None, frames=None, width=None, height=None, save_decoded_frames=True):
         if intra_dur == None: intra_dur = self.intra_dur
@@ -573,39 +570,16 @@ class decoder:
         if frames == None: frames = self.frames
         if width  == None: width  = self.w_pixels
         if height == None: height = self.h_pixels
-        
 
-        mv_per_frame,residuals_per_frame = self.decode_differential_entropy(mv_file, residual_file, block_size)
+        frame_type_seq, mv_per_frame, Qp_per_row_per_frame, residuals_per_frame = self.decode_differential_entropy(mv_file, residual_file, block_size)
 
         self.mv_per_frame = mv_per_frame
         self.residuals_per_frame = residuals_per_frame
 
         ref_frames = [np.ones((height, width)) * 128]  # Hypothetical reference frame of all-128-values for the first frame
         decoded_frames = []
-        decoded_frames = self.decode(residuals_per_frame, mv_per_frame, intra_mode, intra_dur, block_size, frames, width, height)
+        decoded_frames = self.decode(frame_type_seq, residuals_per_frame, Qp_per_row_per_frame, mv_per_frame, intra_mode, intra_dur, block_size, frames, width, height)
         
-        # for i in range(frames):
-
-        #     print("i", i)
-        #     frame_type, mv_for_frame = mv_per_frame[i]
-
-        #     if frame_type == 0:
-        #        decoded_frame, _ = self.decode_frame_intra(mv_for_frame, residuals_per_frame[i], intra_mode, block_size)
-        #     #    plt.imshow(decoded_frame)
-        #     #    plt.show()
-        #        #exit()
-        #     else: 
-        #        decoded_frame    = self.decode_frame_inter(ref_frames, mv_for_frame, residuals_per_frame[i], block_size)
-            
-        #     decoded_frames.append(decoded_frame)
-
-        #     if i < frames - 1:  # Set the current decoded frame as the reference for the next one
-        #         ref_frame = decoded_frame
-        
-        # if save_decoded_frames:
-        #     self.decoded_vid_f = True
-        #     self.decoded_vid   = decoded_frames
-
         return decoded_frames
     
     def save_decoded_frames(self, filename="yuv/decoded_bitstream_frames.yuv"):
