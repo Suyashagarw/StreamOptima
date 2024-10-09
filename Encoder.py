@@ -12,10 +12,8 @@ import matplotlib.patches as patches
 from skimage.metrics import structural_similarity as ssim
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from skimage.metrics import peak_signal_noise_ratio as psnr
-# import parallelTestModule
-# global_ref_buffer=[[[128]*352 for i in range(288)]]
 
-# Y Only Video Codec
+# Y Only Video Codec 
 class Y_Video_codec:
     
 
@@ -310,7 +308,7 @@ class Y_Video_codec:
         
         return FRAMES
 
-      
+
     # Motion Estimation functions
     #Compute Mean Absolute Error between two blocks.
     def compute_mae(self, block1, block2):
@@ -326,7 +324,7 @@ class Y_Video_codec:
         plt.axis("off")
         plt.subplot(1, 3, 3)
         plt.imshow(img3*factor, cmap="gray", vmin=0, vmax=255)
-        plt.axis("off")    
+        plt.axis("off")  
         plt.tight_layout()
         plt.show()
     
@@ -381,11 +379,11 @@ class Y_Video_codec:
         plt.axis('off')  # Turn off the axis
         plt.show()
 
-'''Example usage:
-frame = np.array(...)  # Your frame data here
-ref_indices = np.array(...)  # Your reference frame index data here
-unique_refs = np.unique(ref_indices)  # Unique reference frame indices
-visualize_reference_frames(frame, ref_indices, unique_refs)'''
+# Example usage:
+# frame = np.array(...)  # Your frame data here
+# ref_indices = np.array(...)  # Your reference frame index data here
+# unique_refs = np.unique(ref_indices)  # Unique reference frame indices
+# visualize_reference_frames(frame, ref_indices, unique_refs)
     
     def frac_me_reference_frame(self, ref_frames, block_size):
         all_frames=[]
@@ -475,7 +473,6 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
         total_mae = 0.0
         
         sub_block_size = block_size//2
-        #print("FRAME")
         input_list=[]
         if self.ParallelMode==1 or self.ParallelMode==2:
             start_time=time.time()
@@ -508,7 +505,6 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
         for y in range(0, current_frame.shape[0], block_size):
             for x in range(0, current_frame.shape[1], block_size):
                 # VBS metrics are initialized to None to reflect that they wont be populated unless VBSEnable is set
-                
                 vbs_mvs = None
                 vbs_residuals = None
                 vbs_mae = None
@@ -590,6 +586,7 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
 
     def inter_prediction_parallel(self, x):
         block_size,current_frame,ref_frames,x,y,search_range=x
+        # fast_me=False
         nRefFrames=1
 
         mvs = []
@@ -597,8 +594,8 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
         total_mae = 0.0
         
         sub_block_size = self.block_size//2
+        #PARALLEL
         
-        #PARALLEL        
         # VBS metrics are initialized to None to reflect that they wont be populated unless VBSEnable is set
         vbs_mvs = None
         vbs_residuals = None
@@ -643,6 +640,7 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
 
         if self.fast_me and self.ParallelMode!=1:
             mvp=(0,0,0)
+            #yet to set fast_motion_estimation for FME
             if self.FMEEnable:
                 mv, mae = self.fast_motion_estimation(current_block, ref_frames, x*2, y*2, block_size, mvp, nRefFrames)
                 residual = self.calculate_inter_frame_residual(2*x, 2*y, mv, current_block, ref_frames, block_size )
@@ -781,6 +779,7 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
     def apply_2d_dct(self, input_block):
         # Apply 2D DCT
         transformed_block = dct(dct(input_block, axis=0, norm='ortho'), axis=1, norm='ortho')
+        # Round to the nearest integer
         transformed_block = np.round(transformed_block).astype(int)
         return transformed_block
 
@@ -795,7 +794,8 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
         is_negative = arr < 0
         arr_abs = np.abs(arr)
 
-        # Calculate the nearest power of 2 for positive, non-zero values
+        # Calculate the nearest power of 2 for positive, non-zer:470
+        # o values
         powers_of_2 = np.where(arr_abs > 0, 2 ** np.round(np.log2(arr_abs)), 0)
 
         # Restore the sign for negative values
@@ -905,11 +905,13 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
 
                     # Ensure the coordinates are within the reference frame boundaries
                     if 0 <= pred_x < ref_frame.shape[1] - block_size//2 and 0 <= pred_y < ref_frame.shape[0] - block_size//2:
+                        #predicted_block = ref_frame[pred_y:pred_y + block_size//2, pred_x:pred_x + block_size//2]
                         if self.FMEEnable:
                             if 0 <= pred_x+block_size < ref_frame.shape[1] - block_size and 0 <= pred_y+block_size < ref_frame.shape[0] - block_size:
                                 predicted_block = ref_frame[pred_y:pred_y + block_size:2, pred_x:pred_x + block_size:2]
                             else:
                                 predicted_block = np.ones((block_size//2, block_size//2)) * 128
+                            #predicted_block = ref_frame[pred_y:pred_y + block_size:2, pred_x:pred_x + block_size:2]
                         else: predicted_block = ref_frame[pred_y:pred_y + block_size//2, pred_x:pred_x + block_size//2]
                     else:
                         # Handle the case where the block is outside the boundaries
@@ -1119,6 +1121,7 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
                     zero_count+=1
                 i += 1
                 j -= 1
+        # print(i,j,'asdfa')
         if(non_zero_count):
             result.append(-non_zero_count)
             result.extend(non_zero_values)
@@ -1608,7 +1611,6 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
             if block[0] == 0: # No split
                 transformed_block = self.apply_2d_dct(block[1])
                 quantized_block   = self.quantize_TC(transformed_block, self.Q)
-                #print("Entropy: ", self.entropy_encoder_block(quantized_block, block_size))
                 quantized_sized   += len(self.entropy_encoder_block(quantized_block, block_size))
                 quantized_blocks.append(tuple((0, quantized_block)))
             else: # Split
@@ -1636,6 +1638,7 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
             for row in temp_list:
                 bits_spent_per_row_percentage.append((row/quantized_sized) * 100)
 
+            
         return mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_frame, quantized_sized, bits_spent_per_row_percentage
 
     def complete_inter_flow(self, current_padded_frame, ref_frames, block_size, search_range, generate_row_wise_stats=True):
@@ -1765,6 +1768,7 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
         reconstructed_frames.append(reconstructed_frame)
         approximated_residual_blocks_per_frame.append(quantized_blocks)
         Qp_per_row_per_frame.append(Qp_per_row)
+
         avg_psrn, avg_ssim = self.calculate_metrics(self.y_only_f_arr[i], reconstructed_frame)
         psnr_per_frame.append(avg_psrn)
         ssim_per_frame.append(avg_ssim)
@@ -1776,7 +1780,10 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
         else: 
             print ('Inter:', time.time()-start_time)
             self.inter3.append(time.time()-start_time)
+       
 
+
+        
         return frame_type_seq[-1], quantized_blocks, Qp_per_row_per_frame[-1],mvs_per_frame[-1],reconstructed_frame
 
 
@@ -1826,20 +1833,24 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
                 current_padded_frame = self.pad_hw(self.y_only_f_arr[i], block_size, 128)
                 quantized_blocks     = []
                 Qp_per_row           = []
+
+                #print("Frame Type Seq: ", frame_type_seq)
                 
-                if i%intra_dur == 0 and self.ParallelMode !=1 :     # Intra
+                if i%intra_dur == 0 and self.ParallelMode !=1 :   # Intra
                     self.set_Qp(self.const_init_Qp)
                     mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, row_wise_stats = self.complete_intra_flow(current_padded_frame, intra_mode, block_size, search_range)
                     frame_type_seq.append(0)
-                else:                                               # Inter
+                else:                  # Inter
                     self.set_Qp(self.const_init_Qp)
                     if self.ParallelMode == 1 or self.ParallelMode == 2:
                         if self.ParallelMode == 1: ref_frames = [np.ones((self.h_pixels, self.w_pixels)) * 128]
                     mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_size, row_wise_stats = self.complete_inter_flow(current_padded_frame, ref_frames, block_size, search_range)
+                    #print(f"Frame: {i} || Type: Inter || Residual Size: {residual_size}")
                     frame_type_seq.append(1)
 
                     if self.RCFlag != None and self.RCFlag > 1:
                         if residual_size > self.intra_thresh:
+                            #print(f"\tInter Frame {i} has residual size more than the defined threshold, converting to INTRA FRAME")
                             mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, row_wise_stats = self.complete_intra_flow(current_padded_frame, intra_mode, block_size, search_range)
                             frame_type_seq.pop()
                             frame_type_seq.append(0)
@@ -1861,6 +1872,8 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
        
         decoded_frames = self.decoder.decode(frame_type_seq, approximated_residual_blocks_per_frame, Qp_per_row_per_frame, mvs_per_frame, intra_mode, intra_dur, block_size, self.frames, self.w_pixels, self.h_pixels)
 
+        # Saving the decoded frames to a Y-only file
+        # Collect all calculated results, useful for debugging and printing
         encoded_package["block size"]           = block_size
         encoded_package["num frames"]           = self.frames
         encoded_package["height in pixels"]     = self.h_pixels
@@ -1881,6 +1894,5 @@ visualize_reference_frames(frame, ref_indices, unique_refs)'''
         self.save_y_only(f"yuv/y_only_reconstructed.yuv", reconstructed_frames)
 
         # Comparing the decoded frames with the reconstructed frames
-       
         print(f'0: Intra= {self.intra0}\n0: Inter= {self.inter0}\n1: Intra=  {self.intra1}\n1: Inter= {self.inter1}\n2: Intra= {self.intra2}\n2: Inter= {self.inter2}\n3: Intra=  {self.intra3}\n3: Inter= {self.inter3}')
         return psnr_per_frame

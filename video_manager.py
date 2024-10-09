@@ -33,12 +33,7 @@ class Video_Manager:
             self.vid_frames_yuv444  = self.raw_yuv444_to_frame_arr(raw_f, h_pixels, w_pixels)
         elif v_type == "rgb":
             print("[ERROR] Cannot parse RGB video file!")
-            #self.num_r_p_rgb        = int(h_pixels * w_pixels)
-            #self.num_g_p_rgb        = self.num_r_p_rgb
-            #self.num_b_p_rgb        = self.num_g_p_rgb
-            #self.frame_size_p       = self.num_r_p_rgb + self.num_g_p_rgb + self.num_b_p_rgb
-            #self.v_rgb              = False
-            #self.vid_frames_rgb     = self.raw_rgb_to_frame_arr(raw_f, h_pixels, w_pixels, frames)
+          
                 
 
     def print_status(self):
@@ -213,7 +208,6 @@ class Video_Manager:
            
         if replace:
             self.v_rgb = True
-            #self.vid_frames_rgb = self.raw_yuv444_to_frame_arr(converted_vid_arr, self.h_pixels, self.w_pixels, self.frames, False)
             self.vid_frames_rgb = converted_vid_arr # Index: Frame, h_pixel, w_pixel, component (R/G/B)
             self.num_r_p_rgb = self.num_y_p_yuv_444
             self.num_g_p_rgb = self.num_u_p_yuv_444
@@ -245,7 +239,3 @@ class Video_Manager:
         with open(filename, 'wb') as f:
             for idx, data in enumerate(y_data_list):
                 f.write(data.tobytes())
-#dummy = Video_Manager("video/akiyo_cif.yuv", 288, 352, 300, "yuv_420")
-#dummy.upscale_yuv420_to_yuv444()
-#dummy.convert_yuv444_to_rgb()
-#Y_ONLY = dummy.extract_y_only()
