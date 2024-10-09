@@ -2091,7 +2091,7 @@ class Y_Video_codec:
         encoded_package["approx residual"]      = approximated_residual_blocks_per_frame
         encoded_package["Qp_per_row_per_frame"] = Qp_per_row_per_frame
         encoded_package["frame_type_seq"]       = frame_type_seq
-        self.encoded_package_f              = True
+        asdfsa
 
         if save_enc_pkg == True:
             self.encoded_package = encoded_package
