@@ -5,7 +5,7 @@ from scipy.fftpack import dct, idct
 
 class decoder:
 
-    def __init__(self, intra_mode, intra_dur, block_size, frames, height, width, Qp, nRefFrames, FMEEnable, lam, VBSEnable, VBSoverlay=None, RCFlag=None, targetBR=None, frame_rate=30, qp_rate_tables=None):
+    def __init__(self, intra_mode, intra_dur, block_size, frames, height, width, Qp, nRefFrames, FMEEnable, lam, VBSEnable, VBSoverlay=None, RCFlag=None, targetBR=None, frame_rate=30, qp_rate_tables=None, ParallelMode=0):
         self.intra_mode        = intra_mode
         self.intra_dur         = intra_dur
         self.block_size        = block_size
@@ -31,6 +31,7 @@ class decoder:
         self.bitrate_per_row   = None
         self.frame_rate        = frame_rate
         self.qr_rate_tables    = qp_rate_tables
+        self.ParallelMode      = ParallelMode
 
         if Qp > 0:
             self.Qpm1 = self.Qp-1
@@ -94,6 +95,122 @@ class decoder:
 
     # Inter prediction: Decode a frame using the provided motion vectors and residuals.
     def decode_frame_inter(self, ref_frames, mvs, approximated_residual_blocks, Qp_per_row, block_size=None):
+        if block_size == None: block_size = self.block_size
+
+        reconstructed_frame = np.zeros_like(ref_frames[0]).astype(np.uint8)
+        
+        if self.FMEEnable:
+            ref_frames_fme=self.frac_me_reference_frame(ref_frames, block_size)
+        
+        if self.VBSoverlay:
+            overlay_reconstructed_frame = np.zeros_like(ref_frames[0]).astype(np.uint8)
+        else:
+            overlay_reconstructed_frame = None
+
+        for idx, mv in enumerate(mvs):
+            
+            if self.RCFlag != None and self.RCFlag > 0:
+                if idx%self.num_blocks_per_row == 0:
+                    self.set_Qp(Qp_per_row[int(idx//self.num_blocks_per_row)])
+
+            if mv[0] == 0: # No split
+                block_y = (idx // (ref_frames[mv[1][2]].shape[1] // block_size)) * block_size
+                block_x = (idx % (ref_frames[mv[1][2]].shape[1] // block_size)) * block_size
+
+                #ref_frame = ref_frames[mv[1][2]]  # Reference frame corresponding to the third component of mv
+                if self.FMEEnable:
+                    ref_frame = ref_frames_fme[mv[1][2]]
+                else:
+                    ref_frame = ref_frames[mv[1][2]]  # Reference frame corresponding to the third component of mv
+                mv_x, mv_y = mv[1][0], mv[1][1]  # Motion vector components
+
+                # Calculate the coordinates for the predicted block
+                if self.FMEEnable:
+                    pred_y = 2*block_y + mv_y
+                    pred_x = 2*block_x + mv_x
+                else:
+                    pred_y = block_y + mv_y
+                    pred_x = block_x + mv_x
+
+                # Ensure the coordinates are within the reference frame boundaries
+                if 0 <= pred_x < ref_frame.shape[1] - block_size and 0 <= pred_y < ref_frame.shape[0] - block_size:
+                    if self.FMEEnable:
+                        if 0 <= pred_x+block_size*2 < ref_frame.shape[1] - block_size and 0 <= pred_y+block_size*2 < ref_frame.shape[0] - block_size:
+                            predicted_block = ref_frame[pred_y:pred_y + block_size*2:2, pred_x:pred_x + block_size*2:2]
+                        else:
+                            predicted_block = np.ones((block_size, block_size)) * 128
+                    else: predicted_block = ref_frame[pred_y:pred_y + block_size, pred_x:pred_x + block_size]
+                else:
+                    # Handle the case where the block is outside the boundaries
+                    # This might involve padding or other strategies
+                    predicted_block = self.handle_boundary_conditions(ref_frame, pred_y, pred_x, block_size)
+                reconstructed_block = self.reconstruct_block(predicted_block, approximated_residual_blocks[idx][1], self.Q)
+                if self.VBSEnable:
+                    overlay_reconstructed_block = self.construct_VBS_overlay(0, reconstructed_block)
+
+            else: # Split
+                reconstructed_block = np.ones((block_size, block_size)) * 0
+                for sb_mv_id, sb_mv in enumerate(mv[1]):
+                    block_y = (idx // (ref_frames[sb_mv[2]].shape[1] // block_size)) * block_size
+                    block_x = (idx % (ref_frames[sb_mv[2]].shape[1] // block_size)) * block_size
+                    
+                    vbs_block_y = block_y
+                    vbs_block_x = block_x
+
+                    if sb_mv_id == 1:
+                        vbs_block_x = vbs_block_x + block_size//2
+                    elif sb_mv_id == 2:
+                        vbs_block_y = vbs_block_y + block_size//2
+                    elif sb_mv_id == 3:
+                        vbs_block_x = vbs_block_x + block_size//2
+                        vbs_block_y = vbs_block_y + block_size//2
+
+                    if self.FMEEnable:
+                        ref_frame = ref_frames_fme[sb_mv[2]]
+                    else:
+                        ref_frame = ref_frames[sb_mv[2]]  # Reference frame corresponding to the third component of mv
+                    mv_x, mv_y = sb_mv[0], sb_mv[1]  # Motion vector components
+
+                    # Calculate the coordinates for the predicted block
+                    if self.FMEEnable:
+                        pred_y = 2*vbs_block_y + mv_y
+                        pred_x = 2*vbs_block_x + mv_x
+                    else:
+                        pred_y = vbs_block_y + mv_y
+                        pred_x = vbs_block_x + mv_x
+
+                    # Ensure the coordinates are within the reference frame boundaries
+                    if 0 <= pred_x < ref_frame.shape[1] - block_size//2 and 0 <= pred_y < ref_frame.shape[0] - block_size//2:
+                        if self.FMEEnable:
+                            if 0 <= pred_x+block_size < ref_frame.shape[1] - block_size and 0 <= pred_y+block_size < ref_frame.shape[0] - block_size:
+                                predicted_block = ref_frame[pred_y:pred_y + block_size:2, pred_x:pred_x + block_size:2]
+                            else:
+                                predicted_block = np.ones((block_size//2, block_size//2)) * 128
+                        else: predicted_block = ref_frame[pred_y:pred_y + block_size//2, pred_x:pred_x + block_size//2]
+                    else:
+                        # Handle the case where the block is outside the boundaries
+                        # This might involve padding or other strategies
+                        predicted_block = self.handle_boundary_conditions(ref_frame, pred_y, pred_x, block_size//2)
+                    if sb_mv_id == 0:
+                        reconstructed_block[0:block_size//2, 0:block_size//2] = self.reconstruct_block(predicted_block, approximated_residual_blocks[idx][1][sb_mv_id], self.Qm1)
+                    elif sb_mv_id == 1:
+                        reconstructed_block[0:block_size//2, block_size//2:block_size] = self.reconstruct_block(predicted_block, approximated_residual_blocks[idx][1][sb_mv_id], self.Qm1)
+                    elif sb_mv_id == 2:
+                        reconstructed_block[block_size//2:block_size, 0:block_size//2] = self.reconstruct_block(predicted_block, approximated_residual_blocks[idx][1][sb_mv_id], self.Qm1)
+                    elif sb_mv_id == 3:
+                        reconstructed_block[block_size//2:block_size, block_size//2:block_size] = self.reconstruct_block(predicted_block, approximated_residual_blocks[idx][1][sb_mv_id], self.Qm1)
+
+                    if self.VBSoverlay:
+                        overlay_reconstructed_block = self.construct_VBS_overlay(1, reconstructed_block)
+
+            reconstructed_frame[block_y:block_y+block_size, block_x:block_x+block_size] = reconstructed_block
+
+            if self.VBSoverlay:
+                overlay_reconstructed_frame[block_y:block_y+block_size, block_x:block_x+block_size] = overlay_reconstructed_block
+
+        return reconstructed_frame, overlay_reconstructed_frame
+    
+    def decode_frame_inter_parallel(self, ref_frames, mvs, approximated_residual_blocks, Qp_per_row, block_size=None):
         if block_size == None: block_size = self.block_s
 
         reconstructed_frame = np.zeros_like(ref_frames[0]).astype(np.uint8)
@@ -383,7 +500,15 @@ class decoder:
         decoded_frames = []
         overlay_decoded_frames = []
         
-        #print("Frame_type_seq: ", frame_type_seq)
+        # print("Frame_type_seq: ", frame_type_seq)
+        if self.ParallelMode == 1:
+            ref_frames = [np.ones((height, width)) * 128]
+            for i in range (frames):
+                decoded_frame, overlay_decoded_frame  = self.decode_frame_inter(ref_frames, mv_per_frame[i], residuals_per_frame[i], None, block_size)
+                decoded_frames.append(decoded_frame)
+            return decoded_frames
+
+
         for i in range(frames):
             frame_type = frame_type_seq[i]
 
@@ -394,6 +519,7 @@ class decoder:
                     decoded_frame, _ , overlay_decoded_frame = self.decode_frame_intra(mv_per_frame[i], residuals_per_frame[i], None, intra_mode, block_size)
                 ref_frames = []
             else: 
+                if self.ParallelMode == 3: ref_frames = [np.ones((height, width)) * 128]
                 if self.RCFlag != None and self.RCFlag > 0:
                     decoded_frame, overlay_decoded_frame  = self.decode_frame_inter(ref_frames, mv_per_frame[i], residuals_per_frame[i], Qp_per_row_per_frame[i], block_size)
                 else:

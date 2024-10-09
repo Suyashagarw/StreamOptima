@@ -249,4 +249,3 @@ class Video_Manager:
 #dummy.upscale_yuv420_to_yuv444()
 #dummy.convert_yuv444_to_rgb()
 #Y_ONLY = dummy.extract_y_only()
-
