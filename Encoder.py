@@ -310,10 +310,8 @@ class Y_Video_codec:
         
         return FRAMES
 
-    #############################    
+      
     # Motion Estimation functions
-    #############################
-
     #Compute Mean Absolute Error between two blocks.
     def compute_mae(self, block1, block2):
         return np.mean(np.abs(block1 - block2))
@@ -322,22 +320,13 @@ class Y_Video_codec:
         plt.figure(figsize=(15, 5))
         plt.subplot(1, 3, 1)
         plt.imshow(img1*factor, cmap="gray", vmin=0, vmax=255)
-        # plt.title(f"{title[0].replace('_', ' ')}_block_{block_size}")
         plt.axis("off")
-
         plt.subplot(1, 3, 2)
         plt.imshow(img2*factor, cmap="gray", vmin=0, vmax=255)
-        # # plt.title(f"{title[1].replace('_', ' ')}_block_{block_size}")
         plt.axis("off")
-
         plt.subplot(1, 3, 3)
         plt.imshow(img3*factor, cmap="gray", vmin=0, vmax=255)
-        # # plt.title(f"{title[2].replace('_', ' ')}_block_{block_size}")
-        plt.axis("off")
-
-        
-        # plt.legend('image 1','image 2')
-        # plt.legend(['i=2'], loc='upper right')    
+        plt.axis("off")    
         plt.tight_layout()
         plt.show()
     
@@ -392,11 +381,11 @@ class Y_Video_codec:
         plt.axis('off')  # Turn off the axis
         plt.show()
 
-# Example usage:
-# frame = np.array(...)  # Your frame data here
-# ref_indices = np.array(...)  # Your reference frame index data here
-# unique_refs = np.unique(ref_indices)  # Unique reference frame indices
-# visualize_reference_frames(frame, ref_indices, unique_refs)
+'''Example usage:
+frame = np.array(...)  # Your frame data here
+ref_indices = np.array(...)  # Your reference frame index data here
+unique_refs = np.unique(ref_indices)  # Unique reference frame indices
+visualize_reference_frames(frame, ref_indices, unique_refs)'''
     
     def frac_me_reference_frame(self, ref_frames, block_size):
         all_frames=[]
@@ -447,7 +436,6 @@ class Y_Video_codec:
             block_size = self.block_size
 
         mv_x, mv_y = mv[0], mv[1] # Motion vector components
-        # print(mv)
         ref_frame = ref_frames[mv[2]] # Reference frame corresponding to the third component of mv
         
         # Calculate the coordinates for the predicted block
@@ -520,8 +508,7 @@ class Y_Video_codec:
         for y in range(0, current_frame.shape[0], block_size):
             for x in range(0, current_frame.shape[1], block_size):
                 # VBS metrics are initialized to None to reflect that they wont be populated unless VBSEnable is set
-                # print('reachinggggggggggggggg')
-                # exit()
+                
                 vbs_mvs = None
                 vbs_residuals = None
                 vbs_mae = None
@@ -603,7 +590,6 @@ class Y_Video_codec:
 
     def inter_prediction_parallel(self, x):
         block_size,current_frame,ref_frames,x,y,search_range=x
-        # fast_me=False
         nRefFrames=1
 
         mvs = []
@@ -611,8 +597,8 @@ class Y_Video_codec:
         total_mae = 0.0
         
         sub_block_size = self.block_size//2
-        #PARALLEL
         
+        #PARALLEL        
         # VBS metrics are initialized to None to reflect that they wont be populated unless VBSEnable is set
         vbs_mvs = None
         vbs_residuals = None
@@ -657,7 +643,6 @@ class Y_Video_codec:
 
         if self.fast_me and self.ParallelMode!=1:
             mvp=(0,0,0)
-            #yet to set fast_motion_estimation for FME
             if self.FMEEnable:
                 mv, mae = self.fast_motion_estimation(current_block, ref_frames, x*2, y*2, block_size, mvp, nRefFrames)
                 residual = self.calculate_inter_frame_residual(2*x, 2*y, mv, current_block, ref_frames, block_size )
@@ -796,7 +781,6 @@ class Y_Video_codec:
     def apply_2d_dct(self, input_block):
         # Apply 2D DCT
         transformed_block = dct(dct(input_block, axis=0, norm='ortho'), axis=1, norm='ortho')
-        # Round to the nearest integer
         transformed_block = np.round(transformed_block).astype(int)
         return transformed_block
 
@@ -811,8 +795,7 @@ class Y_Video_codec:
         is_negative = arr < 0
         arr_abs = np.abs(arr)
 
-        # Calculate the nearest power of 2 for positive, non-zer:470
-        # o values
+        # Calculate the nearest power of 2 for positive, non-zero values
         powers_of_2 = np.where(arr_abs > 0, 2 ** np.round(np.log2(arr_abs)), 0)
 
         # Restore the sign for negative values
@@ -922,13 +905,11 @@ class Y_Video_codec:
 
                     # Ensure the coordinates are within the reference frame boundaries
                     if 0 <= pred_x < ref_frame.shape[1] - block_size//2 and 0 <= pred_y < ref_frame.shape[0] - block_size//2:
-                        #predicted_block = ref_frame[pred_y:pred_y + block_size//2, pred_x:pred_x + block_size//2]
                         if self.FMEEnable:
                             if 0 <= pred_x+block_size < ref_frame.shape[1] - block_size and 0 <= pred_y+block_size < ref_frame.shape[0] - block_size:
                                 predicted_block = ref_frame[pred_y:pred_y + block_size:2, pred_x:pred_x + block_size:2]
                             else:
                                 predicted_block = np.ones((block_size//2, block_size//2)) * 128
-                            #predicted_block = ref_frame[pred_y:pred_y + block_size:2, pred_x:pred_x + block_size:2]
                         else: predicted_block = ref_frame[pred_y:pred_y + block_size//2, pred_x:pred_x + block_size//2]
                     else:
                         # Handle the case where the block is outside the boundaries
@@ -1138,7 +1119,6 @@ class Y_Video_codec:
                     zero_count+=1
                 i += 1
                 j -= 1
-        # print(i,j,'asdfa')
         if(non_zero_count):
             result.append(-non_zero_count)
             result.extend(non_zero_values)
@@ -1580,15 +1560,9 @@ class Y_Video_codec:
             mvs = mvs_per_frame[i]
             Qp_per_row = Qp_per_row_per_frame[i]
             residuals = residual_per_frame[i]
-            
-            #if i%intra_dur == 0: frame_type = 0
-            #else: frame_type = 1
-
             frame_type = frame_type_seq[i]
-
             f_trns_mvs_per_frame.write(str(frame_type) + "|" + self.differential_encoder_frame(frame_type, mvs, Qp_per_row) + "\n")
             f_trns_mvs_per_frame_raw.write(str(frame_type) + "|" + str(mvs) + "\n")
-            # f_trns_res_per_frame.write(str(self.entropy_encoder_frame(residuals,block_size)) + "\n")
             f_trns_res_per_frame.write(str(residuals) + "\n")
         
         f_trns_mvs_per_frame.close()
@@ -1599,7 +1573,6 @@ class Y_Video_codec:
     def get_appropriate_Qp_value(self, frame_type, row_bit_budget): # Frame type: 0 == Intra, 1 == Inter
         num_qps = len(self.qr_rate_tables[frame_type])
         for Qp, bitrate in enumerate(self.qr_rate_tables[frame_type]):
-            #print(f"Seraching Qp: Qp = {Qp} and bitrate={bitrate}")
             if bitrate < row_bit_budget:
                 return Qp, bitrate
 
@@ -1644,7 +1617,6 @@ class Y_Video_codec:
                 for sub_block in block[1]:
                     transformed_block = self.apply_2d_dct(sub_block)
                     quantized_block   = self.quantize_TC(transformed_block, self.Qm1)
-                    #print("\t\tEntropy: ", self.entropy_encoder_block(quantized_block, block_size//2))
                     quantized_sized   += len(self.entropy_encoder_block(quantized_block, block_size//2))
                     vbs_blocks.append(quantized_block)
                 
@@ -1663,11 +1635,6 @@ class Y_Video_codec:
 
             for row in temp_list:
                 bits_spent_per_row_percentage.append((row/quantized_sized) * 100)
-
-            #print("Complete Residual size: ", quantized_sized)
-            #print("Row wise stats culmination: ", bits_spent_per_row)
-            #print("Row wise stats: ", temp_list)
-            #print("Row wise stats percentage: ", bits_spent_per_row_percentage)
 
         return mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_frame, quantized_sized, bits_spent_per_row_percentage
 
@@ -1725,7 +1692,6 @@ class Y_Video_codec:
             
             if generate_row_wise_stats and (num_block+1)%self.num_blocks_per_row == 0:
                 bits_spent_per_row.append(quantized_sized)
-        # print(mvs)
         reconstructed_frame = self.reconstruct_frame(mvs, ref_frames, quantized_blocks, Qp_per_row, block_size)
         
         if generate_row_wise_stats:
@@ -1737,53 +1703,28 @@ class Y_Video_codec:
             for row in temp_list:
                 bits_spent_per_row_percentage.append((row/quantized_sized) * 100)
 
-            # print("Complete Residual size: ", quantized_sized)
-            # print("Row wise stats culmination: ", bits_spent_per_row)
-            # print("Row wise stats: ", temp_list)
-            # print("Row wise stats percentage: ", bits_spent_per_row_percentage)
-            # print("Num Data rows: ", len(bits_spent_per_row_percentage))
-
         return mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, quantized_sized, bits_spent_per_row_percentage
 
 
     def encode_frames_parallel(self, data):
         start_time=time.time()
         i=data[1]
-        # time.sleep(i*2)
         q=data[0]
-        # time.sleep(i*2)
-        # print(i, q)
         
         ref_frames = q.get()
         
         while True:
             
-            # print("ref_frames len: ", len(ref_frames))
             if i!=len(ref_frames)-1:
                 q.put(ref_frames)
             else: break
                     
-        # print('executing',i)
-
-        # print(global_ref_buffer[i-1])
-        # print("size of global:", len(global_ref_buffer))
-        # print("ref_frames avg: ", np.average(ref_frames[i]))
-        # global ref_frames
-        # if (i>0):
-        #     ref_frames = [np.array(global_ref_buffer[i-1])]
-        # else :
-        #     ref_frames = [np.array(global_ref_buffer[i])]
-        # print("ref_frames")
-        # print(ref_frames)
-        # if(i==0):time.sleep(2)
-        # print('b',ref_frames.shape)
         new_ref_frame = ref_frames
         frame_type_seq = []
         mae_per_frame  = []
         mvs_per_frame  = []
         approximated_residual_blocks_per_frame = []
         Qp_per_row_per_frame = []
-        # if i%self.intra_dur == 0: ref_frames = [np.ones((self.h_pixels, self.w_pixels)) * 128]  # Start with one reference frame filled with 128
         reconstructed_frames = []
         frame_no       = []
         psnr_per_frame = []
@@ -1802,27 +1743,21 @@ class Y_Video_codec:
         Qp_per_row           = []
         mvs=[]
 
-        #print("Frame Type Seq: ", frame_type_seq)
         
         if i%intra_dur == 0 and self.ParallelMode !=1 :   # Intra
-            # print('reaching')
             self.set_Qp(self.const_init_Qp)
             mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, row_wise_stats = self.complete_intra_flow(current_padded_frame, intra_mode, block_size, search_range)
             frame_type_seq.append(0)
-            # print('intra',mvs)
         else:                  # Inter
             self.set_Qp(self.const_init_Qp)
             mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_size, row_wise_stats = self.complete_inter_flow(current_padded_frame, ref_frames, block_size, search_range)
-            #print(f"Frame: {i} || Type: Inter || Residual Size: {residual_size}")
             frame_type_seq.append(1)
 
             if self.RCFlag != None and self.RCFlag > 1:
                 if residual_size > self.intra_thresh:
-                    #print(f"\tInter Frame {i} has residual size more than the defined threshold, converting to INTRA FRAME")
                     mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, row_wise_stats = self.complete_intra_flow(current_padded_frame, intra_mode, block_size, search_range)
                     frame_type_seq.pop()
                     frame_type_seq.append(0)
-            # print('inter',mvs)
             
         
         mvs_per_frame.append(mvs)
@@ -1830,37 +1765,18 @@ class Y_Video_codec:
         reconstructed_frames.append(reconstructed_frame)
         approximated_residual_blocks_per_frame.append(quantized_blocks)
         Qp_per_row_per_frame.append(Qp_per_row)
-
-        # if i < self.frames - 1:  # Set the current reconstructed frame as the reference for the next one
-            # if len(ref_frames) >= self.nRefFrames:
-            #     ref_frames.pop(0)  # Remove the oldest reference frame if we've reached the limit
-            # ref_frames.append(reconstructed_frame)
-
         avg_psrn, avg_ssim = self.calculate_metrics(self.y_only_f_arr[i], reconstructed_frame)
         psnr_per_frame.append(avg_psrn)
         ssim_per_frame.append(avg_ssim)
-        # print("reconstructed_frame: ", reconstructed_frame.shape)
-        # print("reconstructed_frame_avg: ", np.average(reconstructed_frame))
         new_ref_frame.append(reconstructed_frame)
-        # print("new_ref_frame: ", len(new_ref_frame))
         q.put(new_ref_frame)
-        # print(len(reconstructed_frame[0]))
-        # global_ref_buffer[i]=reconstructed_frame
-        # global_ref_buffer.append(reconstructed_frame)
-        # print("size global_ref_buffer 2: ", len(global_ref_buffer))
         if  i%intra_dur == 0 :
                 print('Intra: ',time.time()-start_time)
                 self.intra3.append(time.time()-start_time)
         else: 
             print ('Inter:', time.time()-start_time)
             self.inter3.append(time.time()-start_time)
-        # print('exiting',i)
-        # print(reconstructed_frame)
-        # global_ref_buffer[i]
-        # exit()
 
-
-        
         return frame_type_seq[-1], quantized_blocks, Qp_per_row_per_frame[-1],mvs_per_frame[-1],reconstructed_frame
 
 
@@ -1901,8 +1817,6 @@ class Y_Video_codec:
                 mvs_per_frame.append(mvs)
             
             reconstructed_frames=np.array(reconstructed_frames)
-            #del
-            # np.savetxt('abc.txt',np.array(global_ref_buffer[1]))
             
         else:
             for i in range(self.frames):
@@ -1912,24 +1826,20 @@ class Y_Video_codec:
                 current_padded_frame = self.pad_hw(self.y_only_f_arr[i], block_size, 128)
                 quantized_blocks     = []
                 Qp_per_row           = []
-
-                #print("Frame Type Seq: ", frame_type_seq)
                 
-                if i%intra_dur == 0 and self.ParallelMode !=1 :   # Intra
+                if i%intra_dur == 0 and self.ParallelMode !=1 :     # Intra
                     self.set_Qp(self.const_init_Qp)
                     mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, row_wise_stats = self.complete_intra_flow(current_padded_frame, intra_mode, block_size, search_range)
                     frame_type_seq.append(0)
-                else:                  # Inter
+                else:                                               # Inter
                     self.set_Qp(self.const_init_Qp)
                     if self.ParallelMode == 1 or self.ParallelMode == 2:
                         if self.ParallelMode == 1: ref_frames = [np.ones((self.h_pixels, self.w_pixels)) * 128]
                     mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, residual_size, row_wise_stats = self.complete_inter_flow(current_padded_frame, ref_frames, block_size, search_range)
-                    #print(f"Frame: {i} || Type: Inter || Residual Size: {residual_size}")
                     frame_type_seq.append(1)
 
                     if self.RCFlag != None and self.RCFlag > 1:
                         if residual_size > self.intra_thresh:
-                            #print(f"\tInter Frame {i} has residual size more than the defined threshold, converting to INTRA FRAME")
                             mvs, average_mae, quantized_blocks, Qp_per_row, reconstructed_frame, _ , residual_size, row_wise_stats = self.complete_intra_flow(current_padded_frame, intra_mode, block_size, search_range)
                             frame_type_seq.pop()
                             frame_type_seq.append(0)
@@ -1948,19 +1858,9 @@ class Y_Video_codec:
                 avg_psrn, avg_ssim = self.calculate_metrics(self.y_only_f_arr[i], reconstructed_frame)
                 psnr_per_frame.append(avg_psrn)
                 ssim_per_frame.append(avg_ssim)
-        # print(mvs_per_frame)
-        # exit()
-        # print(type(mvs_per_frame))
-        # print(np.array(mvs_per_frame).shape)
-        # print((mvs_per_frame))
-        # print(frame_type_seq)
-        # print(Qp_per_row_per_frame)
-        # exit()
+       
         decoded_frames = self.decoder.decode(frame_type_seq, approximated_residual_blocks_per_frame, Qp_per_row_per_frame, mvs_per_frame, intra_mode, intra_dur, block_size, self.frames, self.w_pixels, self.h_pixels)
 
-        # Saving the decoded frames to a Y-only file
-        # self.save_y_only(f"yuv/y_only_decoded.yuv", decoded_frames)
-        # Collect all calculated results, useful for debugging and printing
         encoded_package["block size"]           = block_size
         encoded_package["num frames"]           = self.frames
         encoded_package["height in pixels"]     = self.h_pixels
@@ -1981,7 +1881,6 @@ class Y_Video_codec:
         self.save_y_only(f"yuv/y_only_reconstructed.yuv", reconstructed_frames)
 
         # Comparing the decoded frames with the reconstructed frames
-        # for i in range(self.frames):
-        #     assert np.array_equal(decoded_frames[i], reconstructed_frames[i]), f"Frame {i} mismatch!"
+       
         print(f'0: Intra= {self.intra0}\n0: Inter= {self.inter0}\n1: Intra=  {self.intra1}\n1: Inter= {self.inter1}\n2: Intra= {self.intra2}\n2: Inter= {self.inter2}\n3: Intra=  {self.intra3}\n3: Inter= {self.inter3}')
         return psnr_per_frame
