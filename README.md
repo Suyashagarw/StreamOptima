@@ -1,8 +1,8 @@
-# Video Encoder Optimization Project
+# StreamOptima
 
 ## Overview
 
-This project focuses on enhancing video encoding efficiency through various advanced techniques, including Rate Control, Multi-pass Encoding, Parallelism, and Region of Interest (ROI) Encoding. The objective is to improve video quality while optimizing bitrate and processing time, making it suitable for various applications in digital video processing.
+StreamOptima is a video codec which focuses on enhancing video encoding efficiency through various advanced techniques, including Rate Control, Multi-pass Encoding, Parallelism, and Region of Interest (ROI) Encoding. The objective is to improve video quality while optimizing bitrate and processing time, making it suitable for various applications in digital video processing.
 
 ## Project Structure
 
